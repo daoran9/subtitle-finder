@@ -113,8 +113,9 @@ async function searchSubtitles() {
     state.results = data.results || [];
     addRecent(query);
     renderResults(state.results);
-    setStatus("完成", "ok");
-    nodes.resultSummary.textContent = `${data.count} 条结果`;
+    const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
+    setStatus(errorCount ? "部分完成" : "完成", errorCount ? "warn" : "ok");
+    nodes.resultSummary.textContent = errorCount ? `${data.count} 条结果 · ${errorCount} 个源失败` : `${data.count} 条结果`;
     logger.info(`搜索字幕完成: ${data.count} 条`);
   } catch (error) {
     state.results = [];

@@ -13,6 +13,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = Number(process.env.PORT || 8765);
 const REQUEST_TIMEOUT_MS = 16000;
+const SOURCE_SEARCH_TIMEOUT_MS = 9000;
 const RESULT_CACHE = new Map();
 const YIFY_BASE_URL = "https://yifysubtitles.ch";
 const SUBF2M_BASE_URL = "https://subf2m.co";
@@ -182,27 +183,27 @@ async function handleSearch(url, res) {
   const queryVariants = buildQueryVariants(query);
   const selectedSources = [];
   if (source === "all" || source === "thunder") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)));
+    selectedSources.push({ name: "迅雷字幕", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)) });
   }
   if (source === "all" || source === "subtitlecat") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)));
+    selectedSources.push({ name: "SubtitleCat", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)) });
   }
   if (source === "all" || source === "yify") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchYify(variant, language, sourceLimit)));
+    selectedSources.push({ name: "YIFY Subtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchYify(variant, language, sourceLimit)) });
   }
   if (source === "all" || source === "subf2m") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubf2m(variant, language, sourceLimit)));
+    selectedSources.push({ name: "Subf2m", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubf2m(variant, language, sourceLimit)) });
   }
   if (source === "all" || source === "moviesubtitles") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchMovieSubtitles(variant, language, sourceLimit)));
+    selectedSources.push({ name: "MovieSubtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchMovieSubtitles(variant, language, sourceLimit)) });
   }
   if (source === "all" || source === "tvsubtitles") {
-    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchTvSubtitles(variant, language, sourceLimit)));
+    selectedSources.push({ name: "TVSubtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchTvSubtitles(variant, language, sourceLimit)) });
   }
 
   // 3.3 并发查询字幕源
   const perSourceLimit = requestedEpisode.season && requestedEpisode.episode ? 100 : limit;
-  const tasks = selectedSources.map((searchSource) => searchSource(perSourceLimit));
+  const tasks = selectedSources.map((sourceItem) => searchSourceWithTimeout(sourceItem.name, () => sourceItem.search(perSourceLimit)));
 
   const settled = await Promise.allSettled(tasks);
   const errors = settled
@@ -219,10 +220,37 @@ async function handleSearch(url, res) {
   logger.info(`搜索字幕完成: ${publicResults.length} 条`);
 }
 
+async function searchSourceWithTimeout(sourceName, searchTask) {
+  /*
+   * ================================================================================
+   * 步骤4：限制单源搜索耗时
+   * ================================================================================
+   * 目标：
+   * 1) 避免某个字幕源网络卡住拖慢整次搜索
+   * 2) 超时后让其他来源结果先返回
+   */
+  logger.info("开始限制单源搜索耗时...", sourceName);
+
+  // 4.1 创建超时任务
+  let timer = null;
+  const timeoutTask = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${sourceName} 搜索超时`)), SOURCE_SEARCH_TIMEOUT_MS);
+  });
+
+  // 4.2 执行搜索任务
+  try {
+    const results = await Promise.race([searchTask(), timeoutTask]);
+    logger.info("限制单源搜索耗时完成", sourceName);
+    return results;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function searchWithQueryVariants(queryVariants, limit, searchVariant) {
   /*
    * ================================================================================
-   * 步骤4：按查询变体搜索
+   * 步骤5：按查询变体搜索
    * ================================================================================
    * 目标：
    * 1) 同一个字幕源尝试原词、英文名、中文名等变体
@@ -230,14 +258,14 @@ async function searchWithQueryVariants(queryVariants, limit, searchVariant) {
    */
   logger.info("开始按查询变体搜索...");
 
-  // 4.1 逐个变体查询
+  // 5.1 逐个变体查询
   const results = [];
   for (const variant of queryVariants) {
     const variantResults = await searchVariant(variant);
     results.push(...variantResults);
   }
 
-  // 4.2 去重并裁剪
+  // 5.2 去重并裁剪
   const deduped = dedupeSearchResults(results).slice(0, limit);
   logger.info(`按查询变体搜索完成: ${deduped.length} 条`);
   return deduped;
