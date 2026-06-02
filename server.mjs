@@ -1604,7 +1604,7 @@ async function searchAvSubtitles(query, language, limit) {
    * 步骤16：查询 AVSubtitles 字幕源
    * ================================================================================
    * 目标：
-   * 1) 按番号或关键词搜索成人向字幕
+   * 1) 按编号或关键词搜索专项字幕
    * 2) 解析电影详情页中的语言字幕入口
    */
   logger.info("开始查询 AVSubtitles 字幕源...");
@@ -1658,7 +1658,7 @@ function parseAvSubtitlesSearchResults(html, query, limit) {
    * ================================================================================
    * 目标：
    * 1) 提取电影详情页链接
-   * 2) 用番号做相关性过滤
+   * 2) 用编号做相关性过滤
    */
   logger.info("开始解析 AVSubtitles 搜索结果...");
 
@@ -1724,7 +1724,7 @@ async function searchAiyi(query, language, limit) {
    * 步骤19：查询爱译网字幕源
    * ================================================================================
    * 目标：
-   * 1) 按番号搜索中文简体字幕
+   * 1) 按编号搜索中文简体字幕
    * 2) 解析文章中的直链字幕文件
    */
   logger.info("开始查询爱译网字幕源...");
@@ -1735,10 +1735,10 @@ async function searchAiyi(query, language, limit) {
     return [];
   }
 
-  // 19.2 搜索并严格过滤番号
+  // 19.2 搜索并严格过滤编号
   const code = extractCatalogCode(query);
   if (!code) {
-    logger.info("查询爱译网字幕源完成: 缺少番号");
+    logger.info("查询爱译网字幕源完成: 缺少编号");
     return [];
   }
   const searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(code)}`;
@@ -1771,7 +1771,7 @@ function parseAiyiSearchResults(html, code, limit) {
    * ================================================================================
    * 目标：
    * 1) 提取文章链接
-   * 2) 只保留标题或链接包含目标番号的结果
+   * 2) 只保留标题或链接包含目标编号的结果
    */
   logger.info("开始解析爱译网搜索结果...");
 
@@ -1837,13 +1837,13 @@ function parseAiyiDetail(html, post, code) {
 }
 
 function extractCatalogCode(value) {
-  // 21.3 提取番号样式代码
+  // 21.3 提取编号样式代码
   const match = String(value || "").match(/\b([A-Za-z]{2,8})[-_\s]?(\d{2,6})\b/);
   return match ? `${match[1].toUpperCase()}${match[2]}` : "";
 }
 
 function normalizeCatalogCode(value) {
-  // 21.4 标准化番号比较文本
+  // 21.4 标准化编号比较文本
   return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 

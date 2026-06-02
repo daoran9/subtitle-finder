@@ -3,5 +3,8 @@ dist/
 .npm-cache/
 .electron-cache/
 .electron-builder-cache/
+.privacy-scan-asar/
+CONTEXT.md
 *.log
+builder-debug.yml
 build/icon_variant_*.png

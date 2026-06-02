@@ -1,7 +1,8 @@
 {
   "name": "subtitle-finder",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Local subtitle search desktop app",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -24,6 +25,7 @@
       "electron/preload.cjs",
       "build/icon.ico",
       "build/icon.png",
+      "LICENSE",
       "package.json"
     ],
     "electronDist": "node_modules/electron/dist",
