@@ -4,3 +4,4 @@ dist/
 .electron-cache/
 .electron-builder-cache/
 *.log
+build/icon_variant_*.png

@@ -1,6 +1,6 @@
 {
   "name": "subtitle-finder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local subtitle search desktop app",
   "type": "module",
   "main": "electron/main.mjs",
@@ -16,10 +16,13 @@
     "directories": {
       "output": "dist"
     },
+    "icon": "build/icon.ico",
     "files": [
       "server.mjs",
       "public/**/*",
       "electron/**/*",
+      "build/icon.ico",
+      "build/icon.png",
       "package.json"
     ],
     "electronDist": "node_modules/electron/dist",

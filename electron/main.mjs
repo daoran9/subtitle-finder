@@ -1,5 +1,11 @@
 import { app, BrowserWindow, shell } from "electron";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startServer } from "../server.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
 
 let mainWindow = null;
 let runtimeServer = null;
@@ -31,6 +37,7 @@ async function bootApp() {
     minWidth: 980,
     minHeight: 640,
     title: "字幕检索台",
+    icon: APP_ICON_PATH,
     backgroundColor: "#f5f4ef",
     autoHideMenuBar: true,
     show: false,
