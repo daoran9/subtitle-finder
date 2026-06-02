@@ -13,7 +13,8 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = Number(process.env.PORT || 8765);
 const REQUEST_TIMEOUT_MS = 16000;
-const SOURCE_SEARCH_TIMEOUT_MS = 9000;
+const SOURCE_SEARCH_TIMEOUT_MS = 6000;
+const OVERALL_SEARCH_TIMEOUT_MS = 12000;
 const RESULT_CACHE = new Map();
 const YIFY_BASE_URL = "https://yifysubtitles.ch";
 const SUBF2M_BASE_URL = "https://subf2m.co";
@@ -205,7 +206,7 @@ async function handleSearch(url, res) {
   const perSourceLimit = requestedEpisode.season && requestedEpisode.episode ? 100 : limit;
   const tasks = selectedSources.map((sourceItem) => searchSourceWithTimeout(sourceItem.name, () => sourceItem.search(perSourceLimit)));
 
-  const settled = await Promise.allSettled(tasks);
+  const settled = await settleAllSearchSourcesWithTimeout(tasks);
   const errors = settled
     .filter((item) => item.status === "rejected")
     .map((item) => String(item.reason?.message || item.reason));
@@ -218,6 +219,46 @@ async function handleSearch(url, res) {
   // 3.4 返回结果
   sendJson(res, 200, { query, source, language, variants: queryVariants, count: publicResults.length, results: publicResults, errors });
   logger.info(`搜索字幕完成: ${publicResults.length} 条`);
+}
+
+async function settleAllSearchSourcesWithTimeout(tasks) {
+  /*
+   * ================================================================================
+   * 步骤4：限制整次搜索耗时
+   * ================================================================================
+   * 目标：
+   * 1) 避免极端网络状态下搜索接口一直不返回
+   * 2) 超时后返回已经完成的来源结果
+   */
+  logger.info("开始限制整次搜索耗时...");
+
+  // 4.1 收集已经完成的来源结果
+  const settled = Array.from({ length: tasks.length }, () => null);
+  let completed = 0;
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, OVERALL_SEARCH_TIMEOUT_MS);
+    tasks.forEach((task, index) => {
+      Promise.resolve(task)
+        .then((value) => {
+          settled[index] = { status: "fulfilled", value };
+        })
+        .catch((reason) => {
+          settled[index] = { status: "rejected", reason };
+        })
+        .finally(() => {
+          completed += 1;
+          if (completed === tasks.length) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+    });
+  });
+
+  // 4.2 未完成来源标记为整体超时
+  const results = settled.map((item) => item || { status: "rejected", reason: new Error("搜索整体超时") });
+  logger.info("限制整次搜索耗时完成");
+  return results;
 }
 
 async function searchSourceWithTimeout(sourceName, searchTask) {

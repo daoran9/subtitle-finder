@@ -5,6 +5,7 @@ const state = {
   downloadUrl: "",
   downloadFileName: "",
   downloadDir: "",
+  searchController: null,
 };
 
 const logger = {
@@ -105,7 +106,7 @@ async function searchSubtitles() {
 
   try {
     const params = new URLSearchParams({ q: query, source, lang: language, limit: "80" });
-    const response = await fetch(`/api/search?${params.toString()}`);
+    const response = await fetchWithUiTimeout(`/api/search?${params.toString()}`, 15000);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "搜索失败");
 
@@ -123,6 +124,45 @@ async function searchSubtitles() {
     setStatus("失败", "error");
     nodes.resultSummary.textContent = String(error.message || error);
     logger.error("搜索字幕失败", error);
+  }
+}
+
+async function fetchWithUiTimeout(url, timeoutMs) {
+  /*
+   * ================================================================================
+   * 步骤3：发送带超时的请求
+   * ================================================================================
+   * 目标：
+   * 1) 新搜索开始时取消上一次搜索
+   * 2) 后端或网络异常时不让界面一直停在搜索中
+   */
+  logger.info("开始发送带超时的请求...");
+
+  // 3.1 取消上一次搜索
+  if (state.searchController) {
+    state.searchController.abort();
+  }
+
+  // 3.2 创建本次搜索控制器
+  const controller = new AbortController();
+  state.searchController = controller;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // 3.3 执行请求并清理控制器
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    logger.info("带超时的请求完成");
+    return response;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("搜索超时，已停止等待慢源");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (state.searchController === controller) {
+      state.searchController = null;
+    }
   }
 }
 
