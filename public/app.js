@@ -87,7 +87,7 @@ async function searchSubtitles() {
   clearPreview();
 
   try {
-    const params = new URLSearchParams({ q: query, source, lang: language, limit: "30" });
+    const params = new URLSearchParams({ q: query, source, lang: language, limit: "80" });
     const response = await fetch(`/api/search?${params.toString()}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "搜索失败");

@@ -58,6 +58,12 @@ const tvSubtitlesLanguageCodes = {
   ja: "jp",
 };
 
+const TITLE_ALIAS_GROUPS = [
+  ["Daria", "拽妹黛薇儿", "拽妹黛薇兒", "拽妹黛薇尔"],
+];
+const MAX_QUERY_VARIANTS = 8;
+const MAX_TV_SEASON_PAGES = 12;
+
 /*
  * ================================================================================
  * 步骤1：启动本地服务
@@ -163,7 +169,8 @@ async function handleSearch(url, res) {
   const query = (url.searchParams.get("q") || "").trim();
   const source = (url.searchParams.get("source") || "all").trim();
   const language = (url.searchParams.get("lang") || "zh-CN").trim();
-  const limit = clamp(Number(url.searchParams.get("limit") || 24), 1, 50);
+  const limit = clamp(Number(url.searchParams.get("limit") || 40), 1, 100);
+  const requestedEpisode = parseEpisodeQuery(query);
 
   if (!query) {
     sendJson(res, 400, { error: "请输入搜索字段或文件名" });
@@ -172,43 +179,226 @@ async function handleSearch(url, res) {
   }
 
   // 3.2 按选择组装字幕源
+  const queryVariants = buildQueryVariants(query);
   const selectedSources = [];
   if (source === "all" || source === "thunder") {
-    selectedSources.push((sourceLimit) => searchThunder(query, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)));
   }
   if (source === "all" || source === "subtitlecat") {
-    selectedSources.push((sourceLimit) => searchSubtitleCat(query, language, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)));
   }
   if (source === "all" || source === "yify") {
-    selectedSources.push((sourceLimit) => searchYify(query, language, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchYify(variant, language, sourceLimit)));
   }
   if (source === "all" || source === "subf2m") {
-    selectedSources.push((sourceLimit) => searchSubf2m(query, language, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubf2m(variant, language, sourceLimit)));
   }
   if (source === "all" || source === "moviesubtitles") {
-    selectedSources.push((sourceLimit) => searchMovieSubtitles(query, language, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchMovieSubtitles(variant, language, sourceLimit)));
   }
   if (source === "all" || source === "tvsubtitles") {
-    selectedSources.push((sourceLimit) => searchTvSubtitles(query, language, sourceLimit));
+    selectedSources.push((sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchTvSubtitles(variant, language, sourceLimit)));
   }
 
   // 3.3 并发查询字幕源
-  const perSourceLimit = source === "all" ? Math.max(6, Math.ceil(limit / Math.max(selectedSources.length, 1))) : limit;
+  const perSourceLimit = limit;
   const tasks = selectedSources.map((searchSource) => searchSource(perSourceLimit));
 
   const settled = await Promise.allSettled(tasks);
   const errors = settled
     .filter((item) => item.status === "rejected")
     .map((item) => String(item.reason?.message || item.reason));
-  const results = settled
+  const resultBuckets = settled
     .filter((item) => item.status === "fulfilled")
-    .flatMap((item) => item.value)
-    .slice(0, limit)
+    .map((item) => filterResultsByEpisode(item.value.filter(Boolean), requestedEpisode));
+  const publicResults = mergeSearchResultBuckets(resultBuckets, limit)
     .map(cacheResult);
 
   // 3.4 返回结果
-  sendJson(res, 200, { query, source, language, count: results.length, results, errors });
-  logger.info(`搜索字幕完成: ${results.length} 条`);
+  sendJson(res, 200, { query, source, language, variants: queryVariants, count: publicResults.length, results: publicResults, errors });
+  logger.info(`搜索字幕完成: ${publicResults.length} 条`);
+}
+
+async function searchWithQueryVariants(queryVariants, limit, searchVariant) {
+  /*
+   * ================================================================================
+   * 步骤4：按查询变体搜索
+   * ================================================================================
+   * 目标：
+   * 1) 同一个字幕源尝试原词、英文名、中文名等变体
+   * 2) 合并同源重复结果
+   */
+  logger.info("开始按查询变体搜索...");
+
+  // 4.1 逐个变体查询
+  const results = [];
+  for (const variant of queryVariants) {
+    const variantResults = await searchVariant(variant);
+    results.push(...variantResults);
+  }
+
+  // 4.2 去重并裁剪
+  const deduped = dedupeSearchResults(results).slice(0, limit);
+  logger.info(`按查询变体搜索完成: ${deduped.length} 条`);
+  return deduped;
+}
+
+function buildQueryVariants(query) {
+  /*
+   * ================================================================================
+   * 步骤5：生成查询变体
+   * ================================================================================
+   * 目标：
+   * 1) 保留用户原始输入
+   * 2) 拆出中英文片名
+   * 3) 用本地别名表扩展中英文标题
+   */
+  logger.info("开始生成查询变体...");
+
+  // 5.1 初始化变体集合
+  const normalized = String(query || "").replace(/\s+/g, " ").trim();
+  const variants = [];
+  const addVariant = (value) => {
+    const item = String(value || "").replace(/\s+/g, " ").trim();
+    if (item && !variants.some((variant) => variant.toLowerCase() === item.toLowerCase())) {
+      variants.push(item);
+    }
+  };
+  addVariant(normalized);
+
+  // 5.2 拆出中英文关键词
+  const episode = parseEpisodeQuery(normalized);
+  for (const item of extractLatinTitleCandidates(normalized)) addVariant(appendEpisodeToken(item, episode));
+  for (const item of extractCjkTitleCandidates(normalized)) addVariant(appendEpisodeToken(item, episode));
+
+  // 5.3 扩展本地别名
+  const lower = normalized.toLowerCase();
+  for (const group of TITLE_ALIAS_GROUPS) {
+    if (!group.some((alias) => lower.includes(alias.toLowerCase()))) continue;
+    for (const alias of group) {
+      addVariant(episode.token ? appendEpisodeToken(alias, episode) : alias);
+    }
+  }
+
+  logger.info(`生成查询变体完成: ${variants.join(" | ")}`);
+  return variants.slice(0, MAX_QUERY_VARIANTS);
+}
+
+function extractLatinTitleCandidates(query) {
+  // 5.4 提取英文标题候选
+  const withoutEpisode = String(query || "")
+    .replace(/\bs0*\d{1,2}\s*e0*\d{1,3}\b/gi, " ")
+    .replace(/\b0*\d{1,2}\s*x\s*0*\d{1,3}\b/gi, " ");
+  return [...withoutEpisode.matchAll(/[A-Za-z][A-Za-z0-9'’:&.!? -]{1,}/g)]
+    .map((match) => match[0].replace(/\s+/g, " ").trim())
+    .filter((item) => item.length > 1);
+}
+
+function extractCjkTitleCandidates(query) {
+  // 5.5 提取中文标题候选
+  return [...String(query || "").matchAll(/[\p{Script=Han}][\p{Script=Han}·・\s]{1,}/gu)]
+    .map((match) => match[0].replace(/\s+/g, "").trim())
+    .filter((item) => item.length > 1);
+}
+
+function appendEpisodeToken(title, episode) {
+  // 5.6 给别名补回季集信息
+  if (!episode?.token || String(title || "").toLowerCase().includes(episode.token.toLowerCase())) {
+    return title;
+  }
+  return `${title} ${episode.token}`;
+}
+
+function dedupeSearchResults(results) {
+  // 5.7 合并重复搜索结果
+  const unique = new Map();
+  for (const result of results) {
+    const key = getSearchResultKey(result);
+    if (!unique.has(key)) unique.set(key, result);
+  }
+  return [...unique.values()];
+}
+
+function mergeSearchResultBuckets(buckets, limit) {
+  /*
+   * ================================================================================
+   * 步骤6：合并多源结果
+   * ================================================================================
+   * 目标：
+   * 1) 每个字幕源保留展示机会
+   * 2) 避免单一来源占满 all 模式结果
+   */
+  logger.info("开始合并多源结果...");
+
+  // 6.1 按来源轮转取结果
+  const merged = [];
+  const seen = new Set();
+  const maxLength = Math.max(0, ...buckets.map((bucket) => bucket.length));
+  for (let index = 0; index < maxLength && merged.length < limit; index += 1) {
+    for (const bucket of buckets) {
+      const result = bucket[index];
+      if (!result) continue;
+      const key = getSearchResultKey(result);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(result);
+      if (merged.length >= limit) break;
+    }
+  }
+
+  logger.info(`合并多源结果完成: ${merged.length} 条`);
+  return merged;
+}
+
+function getSearchResultKey(result) {
+  // 6.2 生成搜索结果去重键
+  return [
+    result.source,
+    result.detailUrl || result.downloadUrl || "",
+    String(result.fileName || result.title || "").toLowerCase(),
+  ].join("|");
+}
+
+function filterResultsByEpisode(results, episode) {
+  /*
+   * ================================================================================
+   * 步骤7：按季集过滤结果
+   * ================================================================================
+   * 目标：
+   * 1) 用户输入 1x01 / S01E01 时只保留对应剧集
+   * 2) 避免站点把整剧热门结果混入单集搜索
+   */
+  logger.info("开始按季集过滤结果...");
+
+  // 7.1 非单集搜索直接返回原结果
+  if (!episode?.season || !episode?.episode) {
+    logger.info("按季集过滤结果完成: 未指定单集");
+    return results;
+  }
+
+  // 7.2 匹配结果标题、文件名和补充字段中的季集号
+  const filtered = results.filter((result) => searchResultMatchesEpisode(result, episode));
+  logger.info(`按季集过滤结果完成: ${filtered.length} 条`);
+  return filtered;
+}
+
+function searchResultMatchesEpisode(result, episode) {
+  // 7.3 判断搜索结果是否匹配指定季集
+  const text = [result.title, result.fileName, result.extra].filter(Boolean).join(" ");
+  return extractEpisodeTokens(text).some((item) => item.season === episode.season && item.episode === episode.episode);
+}
+
+function extractEpisodeTokens(text) {
+  // 7.4 提取结果中的 S01E01 / 1x01 标记
+  const normalized = String(text || "");
+  const tokens = [];
+  for (const match of normalized.matchAll(/\bs0*(\d{1,2})\s*e0*(\d{1,3})\b/gi)) {
+    tokens.push({ season: Number(match[1]), episode: Number(match[2]) });
+  }
+  for (const match of normalized.matchAll(/\b0*(\d{1,2})\s*x\s*0*(\d{1,3})\b/gi)) {
+    tokens.push({ season: Number(match[1]), episode: Number(match[2]) });
+  }
+  return tokens;
 }
 
 async function handlePreview(url, res) {
@@ -696,17 +886,26 @@ async function searchTvSubtitles(query, language, limit) {
   });
   const html = await response.text();
   const shows = parseTvSubtitlesShows(html).slice(0, 3);
-  const season = parseSeasonFromQuery(query);
+  const episode = parseEpisodeQuery(query);
 
   // 11.3 进入季页解析字幕条目
   const results = [];
   for (const show of shows) {
-    const pageUrl = season ? buildTvSubtitlesSeasonUrl(show.detailUrl, season) : show.detailUrl;
-    const pageResponse = await fetchWithTimeout(pageUrl, {
+    const firstPageUrl = episode.season ? buildTvSubtitlesSeasonUrl(show.detailUrl, episode.season) : show.detailUrl;
+    const firstPageResponse = await fetchWithTimeout(firstPageUrl, {
       headers: { ...browserHeaders, referer: TV_SUBTITLES_BASE_URL },
     });
-    const pageHtml = await pageResponse.text();
-    results.push(...parseTvSubtitlesRows(pageHtml, show, languageCode));
+    const firstPageHtml = await firstPageResponse.text();
+    const seasonUrls = episode.season
+      ? [buildTvSubtitlesSeasonUrl(show.detailUrl, episode.season)]
+      : collectTvSubtitlesSeasonUrls(firstPageHtml, firstPageResponse.url || firstPageUrl);
+    for (const seasonUrl of seasonUrls.slice(0, MAX_TV_SEASON_PAGES)) {
+      const pageHtml = seasonUrl === (firstPageResponse.url || firstPageUrl)
+        ? firstPageHtml
+        : await fetchTvSubtitlesSeasonHtml(seasonUrl);
+      results.push(...parseTvSubtitlesRows(pageHtml, show, languageCode, episode));
+      if (results.length >= limit) break;
+    }
     if (results.length >= limit) break;
   }
 
@@ -728,22 +927,63 @@ function buildTvSubtitlesSeasonUrl(showUrl, season) {
   return showUrl.replace(/tvshow-(\d+)(?:-\d+)?\.html/i, `tvshow-$1-${season}.html`);
 }
 
-function parseSeasonFromQuery(query) {
-  // 11.6 从 S01E02 或 1x02 形式提取季数
-  const normalized = String(query || "");
-  const sxe = normalized.match(/\bs0*(\d{1,2})\s*e0*\d{1,2}\b/i);
-  if (sxe) return Number(sxe[1]);
-  const nxm = normalized.match(/\b0*(\d{1,2})\s*x\s*0*\d{1,2}\b/i);
-  return nxm ? Number(nxm[1]) : 0;
+function collectTvSubtitlesSeasonUrls(html, currentUrl) {
+  // 11.6 收集剧集全部季页
+  const seasons = new Map();
+  const showId = matchFirst(currentUrl, /tvshow-(\d+)(?:-\d+)?\.html/i);
+  const addUrl = (value) => {
+    const resolved = new URL(htmlDecode(value), currentUrl).href;
+    const resolvedShowId = matchFirst(resolved, /tvshow-(\d+)-\d+\.html/i);
+    const season = parseTvSubtitlesSeasonNumber(resolved);
+    if (showId && resolvedShowId === showId && season) {
+      seasons.set(season, new URL(`/tvshow-${showId}-${season}.html`, TV_SUBTITLES_BASE_URL).href);
+    }
+  };
+
+  addUrl(currentUrl);
+  for (const match of html.matchAll(/href=["']([^"']*tvshow-\d+-\d+\.html)["']/gi)) {
+    addUrl(match[1]);
+  }
+
+  return [...seasons.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map((item) => item[1]);
 }
 
-function parseTvSubtitlesRows(html, show, languageCode) {
-  // 11.7 解析剧集字幕列表
+function parseTvSubtitlesSeasonNumber(url) {
+  // 11.7 解析 TVSubtitles 季页编号
+  return Number(matchFirst(String(url || ""), /tvshow-\d+-(\d+)\.html/i) || 0);
+}
+
+function parseEpisodeQuery(query) {
+  // 11.8 从 S01E02 或 1x02 形式提取季集
+  const normalized = String(query || "");
+  const sxe = normalized.match(/\bs0*(\d{1,2})\s*e0*(\d{1,3})\b/i);
+  if (sxe) return { season: Number(sxe[1]), episode: Number(sxe[2]), token: sxe[0] };
+  const nxm = normalized.match(/\b0*(\d{1,2})\s*x\s*0*(\d{1,3})\b/i);
+  if (nxm) return { season: Number(nxm[1]), episode: Number(nxm[2]), token: nxm[0] };
+  return { season: 0, episode: 0, token: "" };
+}
+
+async function fetchTvSubtitlesSeasonHtml(seasonUrl) {
+  // 11.9 请求 TVSubtitles 季页
+  const pageResponse = await fetchWithTimeout(seasonUrl, {
+    headers: { ...browserHeaders, referer: TV_SUBTITLES_BASE_URL },
+  });
+  return pageResponse.text();
+}
+
+function parseTvSubtitlesRows(html, show, languageCode, episode = {}) {
+  // 11.10 解析剧集字幕列表
   const rows = [...html.matchAll(/<tr\b[^>]*>\s*<td>(\d+x\d+)<\/td>\s*<td[^>]*>\s*<a\s+[^>]*href=["'][^"']*episode-\d+\.html["'][^>]*>\s*<b>([\s\S]*?)<\/b>\s*<\/a>\s*<\/td>\s*<td>(\d+)<\/td>\s*<td>([\s\S]*?)<\/td>\s*<\/tr>/gi)];
   const results = [];
 
   for (const row of rows) {
     const episodeNumber = htmlDecode(row[1]).trim();
+    if (episode.season && episode.episode && !tvEpisodeNumberMatches(episodeNumber, episode)) {
+      continue;
+    }
+
     const episodeTitle = htmlDecode(stripTags(row[2])).replace(/\s+/g, " ").trim();
     const amount = htmlDecode(row[3]).trim();
     const subtitlesCell = row[4];
@@ -773,6 +1013,13 @@ function parseTvSubtitlesRows(html, show, languageCode) {
   }
 
   return results;
+}
+
+function tvEpisodeNumberMatches(episodeNumber, episode) {
+  // 11.11 判断 TVSubtitles 行是否匹配指定集数
+  const match = String(episodeNumber || "").match(/0*(\d{1,2})\s*x\s*0*(\d{1,3})/i);
+  if (!match) return false;
+  return Number(match[1]) === episode.season && Number(match[2]) === episode.episode;
 }
 
 async function fetchSubtitleBytes(result, language) {
