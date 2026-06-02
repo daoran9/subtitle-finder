@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>字幕检索台</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23256b4a'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-size='34' font-family='Segoe UI,Arial' fill='white' font-weight='700'%3ES%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <aside class="search-rail" aria-label="搜索控制">
+          <div class="brand-row">
+            <div class="brand-mark" aria-hidden="true">S</div>
+            <div>
+              <h1>字幕检索台</h1>
+              <p>按字段、文件名、番号搜索字幕</p>
+            </div>
+          </div>
+
+          <form id="searchForm" class="search-form">
+            <label for="queryInput">搜索字段</label>
+            <div class="input-stack">
+              <input id="queryInput" name="q" autocomplete="off" placeholder="例如 PRED-483 / movie name" />
+              <button type="submit" title="搜索">
+                <span aria-hidden="true">⌕</span>
+                <span>搜索</span>
+              </button>
+            </div>
+
+            <div class="field-grid">
+              <label>
+                字幕源
+                <select id="sourceSelect" name="source">
+                  <option value="all">全部</option>
+                  <option value="thunder">迅雷字幕</option>
+                  <option value="subtitlecat">SubtitleCat</option>
+                  <option value="yify">YIFY Subtitles</option>
+                  <option value="subf2m">Subf2m</option>
+                </select>
+              </label>
+              <label>
+                语言
+                <select id="languageSelect" name="lang">
+                  <option value="zh-CN">简体中文</option>
+                  <option value="zh-TW">繁体中文</option>
+                  <option value="en">英文</option>
+                  <option value="ja">日文</option>
+                </select>
+              </label>
+            </div>
+          </form>
+
+          <div class="hint-block">
+            <span class="hint-title">使用方式</span>
+            <p>输入视频名或番号，点结果即可预览字幕内容。</p>
+          </div>
+
+          <div class="recent-block">
+            <div class="section-title">
+              <span>最近搜索</span>
+              <button id="clearRecentButton" type="button">清空</button>
+            </div>
+            <div id="recentList" class="recent-list"></div>
+          </div>
+        </aside>
+
+        <section class="results-pane" aria-label="搜索结果">
+          <header class="pane-header">
+            <div>
+              <h2>结果</h2>
+              <p id="resultSummary">等待搜索</p>
+            </div>
+            <div id="statusBadge" class="status-badge">就绪</div>
+          </header>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>文件名</th>
+                  <th>语言</th>
+                  <th>分数</th>
+                  <th>下载</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr class="empty-row">
+                  <td colspan="5">输入字段后开始搜索。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="preview-pane" aria-label="字幕预览">
+          <header class="pane-header">
+            <div>
+              <h2>预览</h2>
+              <p id="previewMeta">未选择字幕</p>
+            </div>
+            <div class="preview-actions">
+              <button id="copyButton" type="button" title="复制字幕内容">复制</button>
+              <a id="downloadLink" href="#" class="download-link" aria-disabled="true">下载</a>
+            </div>
+          </header>
+
+          <pre id="previewText" class="preview-text">点击左侧结果查看字幕内容。</pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

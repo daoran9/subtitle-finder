@@ -1,0 +1,41 @@
+{
+  "name": "subtitle-finder",
+  "version": "1.0.0",
+  "description": "Local subtitle search desktop app",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "app": "electron .",
+    "build:win": "electron-builder --win portable --x64",
+    "check": "node --check server.mjs && node --check public/app.js && node --check electron/main.mjs"
+  },
+  "build": {
+    "appId": "local.subtitle.finder",
+    "productName": "SubtitleFinder",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "server.mjs",
+      "public/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "electronDist": "node_modules/electron/dist",
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1"
+  }
+}
