@@ -295,15 +295,49 @@ function buildSelectedSearchSources({ source, queryVariants, language }) {
   ];
 
   // 4.2 按选择过滤字幕源
-  const selected = source === "all" ? availableSources.filter((item) => item.includeInAll !== false) : availableSources.filter((item) => item.key === source);
+  const selected = source === "all"
+    ? availableSources.filter((item) => shouldIncludeSourceInAll(item, queryVariants, language))
+    : availableSources.filter((item) => item.key === source);
   logger.info(`组装搜索源完成: ${selected.map((item) => item.name).join(", ") || "empty"}`);
   return selected;
+}
+
+function shouldIncludeSourceInAll(sourceItem, queryVariants, language) {
+  /*
+   * ================================================================================
+   * 步骤5：判断全部搜索是否包含字幕源
+   * ================================================================================
+   * 目标：
+   * 1) 常规源始终参与全部搜索
+   * 2) 专项源只在关键词明显匹配时参与，避免拖慢普通搜索
+   */
+  logger.info("开始判断全部搜索字幕源...", sourceItem.name);
+
+  // 5.1 常规源直接加入
+  if (sourceItem.includeInAll !== false) {
+    logger.info("判断全部搜索字幕源完成: 常规源");
+    return true;
+  }
+
+  // 5.2 明确编号搜索加入编号类字幕源
+  const queryText = queryVariants.join(" ");
+  const hasCatalogCode = Boolean(extractCatalogCode(queryText));
+  if ((sourceItem.key === "aiyi" || sourceItem.key === "avsubtitles") && hasCatalogCode) {
+    const supportedLanguage = sourceItem.key === "aiyi"
+      ? language === "zh-CN" || language === "zh-TW"
+      : Boolean(getAvSubtitlesLanguageCode(language));
+    logger.info("判断全部搜索字幕源完成: 编号源", supportedLanguage);
+    return supportedLanguage;
+  }
+
+  logger.info("判断全部搜索字幕源完成: 跳过");
+  return false;
 }
 
 function filterLatinQueryVariants(queryVariants) {
   /*
    * ================================================================================
-   * 步骤5：筛选英文查询变体
+   * 步骤6：筛选英文查询变体
    * ================================================================================
    * 目标：
    * 1) 给只支持英文标题的字幕源使用
