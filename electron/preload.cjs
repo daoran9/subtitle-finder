@@ -16,6 +16,7 @@ logger.info("开始暴露桌面保存接口...");
 
 // 1.1 暴露保存字幕方法
 contextBridge.exposeInMainWorld("subtitleFinder", {
+  selectDownloadDir: () => ipcRenderer.invoke("subtitle:select-download-dir"),
   saveSubtitle: (payload) => ipcRenderer.invoke("subtitle:save", payload),
 });
 

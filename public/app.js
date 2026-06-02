@@ -4,6 +4,7 @@ const state = {
   previewText: "",
   downloadUrl: "",
   downloadFileName: "",
+  downloadDir: "",
 };
 
 const logger = {
@@ -23,6 +24,7 @@ const nodes = {
   previewMeta: document.querySelector("#previewMeta"),
   previewText: document.querySelector("#previewText"),
   copyButton: document.querySelector("#copyButton"),
+  chooseDirButton: document.querySelector("#chooseDirButton"),
   downloadButton: document.querySelector("#downloadButton"),
   recentList: document.querySelector("#recentList"),
   clearRecentButton: document.querySelector("#clearRecentButton"),
@@ -54,13 +56,21 @@ nodes.downloadButton.addEventListener("click", async () => {
   await downloadSubtitle();
 });
 
-// 1.4 绑定最近搜索清理
+// 1.4 绑定保存位置选择
+nodes.chooseDirButton.addEventListener("click", async () => {
+  await chooseDownloadDir();
+});
+
+// 1.5 绑定最近搜索清理
 nodes.clearRecentButton.addEventListener("click", () => {
   localStorage.removeItem("subtitle-finder-recent");
   renderRecent();
 });
 
-// 1.5 渲染最近搜索
+// 1.6 恢复保存位置
+restoreDownloadDir();
+
+// 1.7 渲染最近搜索
 renderRecent();
 logger.info("页面初始化完成");
 
@@ -238,7 +248,7 @@ async function downloadSubtitle() {
    * 步骤5：下载字幕文件
    * ================================================================================
    * 目标：
-   * 1) 桌面版弹出保存路径选择框
+   * 1) 桌面版下载到预先选择的保存目录
    * 2) 浏览器版保留普通下载行为
    */
   logger.info("开始下载字幕文件...");
@@ -253,11 +263,18 @@ async function downloadSubtitle() {
   // 5.2 桌面版调用 Electron 保存对话框
   const absoluteUrl = new URL(state.downloadUrl, window.location.href).href;
   if (window.subtitleFinder?.saveSubtitle) {
+    if (!state.downloadDir) {
+      setStatus("先选位置", "warn");
+      logger.info("下载字幕文件完成: 未选择保存位置");
+      return;
+    }
+
     try {
       setStatus("保存中", "busy");
       const result = await window.subtitleFinder.saveSubtitle({
         downloadUrl: absoluteUrl,
         fileName: state.downloadFileName || "subtitle.srt",
+        downloadDir: state.downloadDir,
       });
       if (result?.error) throw new Error(result.error);
       setStatus(result?.saved ? "已保存" : "已取消", result?.saved ? "ok" : "warn");
@@ -278,6 +295,56 @@ async function downloadSubtitle() {
   link.remove();
   setStatus("已下载", "ok");
   logger.info("下载字幕文件完成: browser");
+}
+
+async function chooseDownloadDir() {
+  /*
+   * ================================================================================
+   * 步骤6：选择下载目录
+   * ================================================================================
+   * 目标：
+   * 1) 桌面版弹出文件夹选择框
+   * 2) 记录选择结果供后续下载直接使用
+   */
+  logger.info("开始选择下载目录...");
+
+  // 6.1 校验桌面能力
+  if (!window.subtitleFinder?.selectDownloadDir) {
+    setStatus("浏览器下载", "warn");
+    logger.info("选择下载目录完成: browser");
+    return;
+  }
+
+  // 6.2 选择并保存目录
+  const result = await window.subtitleFinder.selectDownloadDir();
+  if (!result?.selected || !result.directory) {
+    setStatus("已取消", "warn");
+    logger.info("选择下载目录完成: cancel");
+    return;
+  }
+  state.downloadDir = result.directory;
+  localStorage.setItem("subtitle-finder-download-dir", state.downloadDir);
+  renderDownloadDir();
+
+  setStatus("已选位置", "ok");
+  logger.info("选择下载目录完成", state.downloadDir);
+}
+
+function restoreDownloadDir() {
+  // 6.3 恢复上次选择的下载目录
+  state.downloadDir = localStorage.getItem("subtitle-finder-download-dir") || "";
+  renderDownloadDir();
+}
+
+function renderDownloadDir() {
+  // 6.4 更新下载目录按钮状态
+  if (state.downloadDir) {
+    nodes.chooseDirButton.textContent = "位置已选";
+    nodes.chooseDirButton.title = state.downloadDir;
+    return;
+  }
+  nodes.chooseDirButton.textContent = "位置";
+  nodes.chooseDirButton.title = "选择存放位置";
 }
 
 function addRecent(query) {
