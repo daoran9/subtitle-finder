@@ -201,7 +201,7 @@ async function handleSearch(url, res) {
   }
 
   // 3.3 并发查询字幕源
-  const perSourceLimit = limit;
+  const perSourceLimit = requestedEpisode.season && requestedEpisode.episode ? 100 : limit;
   const tasks = selectedSources.map((searchSource) => searchSource(perSourceLimit));
 
   const settled = await Promise.allSettled(tasks);
@@ -211,7 +211,7 @@ async function handleSearch(url, res) {
   const resultBuckets = settled
     .filter((item) => item.status === "fulfilled")
     .map((item) => filterResultsByEpisode(item.value.filter(Boolean), requestedEpisode));
-  const publicResults = mergeSearchResultBuckets(resultBuckets, limit)
+  const publicResults = mergeSearchResultBuckets(resultBuckets, limit, { queryVariants, requestedEpisode, balanced: source === "all" })
     .map(cacheResult);
 
   // 3.4 返回结果
@@ -319,44 +319,164 @@ function dedupeSearchResults(results) {
   return [...unique.values()];
 }
 
-function mergeSearchResultBuckets(buckets, limit) {
+function mergeSearchResultBuckets(buckets, limit, options = {}) {
   /*
    * ================================================================================
    * 步骤6：合并多源结果
    * ================================================================================
    * 目标：
-   * 1) 每个字幕源保留展示机会
-   * 2) 避免单一来源占满 all 模式结果
+   * 1) 过滤明显不匹配片名的结果
+   * 2) 同一片名或剧集按季集顺序排在一起
+   * 3) 全部字幕源模式保留每个来源的展示数量
    */
   logger.info("开始合并多源结果...");
 
-  // 6.1 按来源轮转取结果
-  const merged = [];
+  // 6.1 去重并过滤明显无关结果
+  const needles = buildTitleNeedles(options.queryVariants || []);
   const seen = new Set();
-  const maxLength = Math.max(0, ...buckets.map((bucket) => bucket.length));
-  for (let index = 0; index < maxLength && merged.length < limit; index += 1) {
-    for (const bucket of buckets) {
-      const result = bucket[index];
-      if (!result) continue;
+  const sourceCap = options.balanced ? Math.max(12, Math.ceil(limit / 3)) : limit;
+  const candidates = [];
+  for (const bucket of buckets) {
+    let sourceCount = 0;
+    for (const result of bucket) {
+      if (!searchResultMatchesTitle(result, needles)) continue;
       const key = getSearchResultKey(result);
       if (seen.has(key)) continue;
       seen.add(key);
-      merged.push(result);
-      if (merged.length >= limit) break;
+      candidates.push(result);
+      sourceCount += 1;
+      if (sourceCount >= sourceCap) break;
     }
   }
+
+  // 6.2 按片名、季集、来源稳定排序
+  const merged = candidates
+    .sort((left, right) => compareSearchResults(left, right, needles, options.requestedEpisode))
+    .slice(0, limit);
 
   logger.info(`合并多源结果完成: ${merged.length} 条`);
   return merged;
 }
 
 function getSearchResultKey(result) {
-  // 6.2 生成搜索结果去重键
+  // 6.3 生成搜索结果去重键
   return [
     result.source,
-    result.detailUrl || result.downloadUrl || "",
-    String(result.fileName || result.title || "").toLowerCase(),
+    normalizeComparableText(result.title || result.fileName || ""),
   ].join("|");
+}
+
+function buildTitleNeedles(queryVariants) {
+  // 6.4 生成片名匹配关键词
+  const needles = [];
+  for (const variant of queryVariants) {
+    const value = stripEpisodeTokens(variant).trim();
+    if (!value) continue;
+    const normalized = normalizeComparableText(value);
+    if (normalized && !needles.some((item) => item.normalized === normalized)) {
+      needles.push({ raw: value, normalized });
+    }
+  }
+  return needles;
+}
+
+function stripEpisodeTokens(value) {
+  // 6.5 移除查询中的季集标记
+  return String(value || "")
+    .replace(/\bs0*\d{1,2}\s*e0*\d{1,3}\b/gi, " ")
+    .replace(/\b0*\d{1,2}\s*x\s*0*\d{1,3}\b/gi, " ")
+    .replace(/\s+/g, " ");
+}
+
+function searchResultMatchesTitle(result, needles) {
+  // 6.6 判断结果是否匹配片名关键词
+  if (!needles.length) return true;
+  const text = normalizeComparableText(getSearchResultText(result));
+  return needles.some((needle) => text.includes(needle.normalized));
+}
+
+function compareSearchResults(left, right, needles, requestedEpisode) {
+  // 6.7 比较搜索结果展示顺序
+  const leftScore = scoreSearchResult(left, needles, requestedEpisode);
+  const rightScore = scoreSearchResult(right, needles, requestedEpisode);
+  if (leftScore !== rightScore) return rightScore - leftScore;
+
+  const leftGroup = getSearchResultGroupKey(left, needles);
+  const rightGroup = getSearchResultGroupKey(right, needles);
+  if (leftGroup !== rightGroup) return leftGroup.localeCompare(rightGroup);
+
+  const leftEpisode = getSearchResultEpisodeKey(left);
+  const rightEpisode = getSearchResultEpisodeKey(right);
+  if (leftEpisode !== rightEpisode) return leftEpisode - rightEpisode;
+
+  const leftSource = getSourceOrder(left.source);
+  const rightSource = getSourceOrder(right.source);
+  if (leftSource !== rightSource) return leftSource - rightSource;
+
+  return String(left.title || "").localeCompare(String(right.title || ""));
+}
+
+function scoreSearchResult(result, needles, requestedEpisode) {
+  // 6.8 给搜索结果计算相关度
+  const title = normalizeComparableText(result.title || "");
+  const text = normalizeComparableText(getSearchResultText(result));
+  let score = 0;
+  let titleScore = 0;
+
+  for (const [index, needle] of needles.entries()) {
+    if (title.includes(needle.normalized)) titleScore = Math.max(titleScore, 80 - index);
+    else if (text.includes(needle.normalized)) titleScore = Math.max(titleScore, 40 - index);
+  }
+  score += titleScore;
+
+  const episodes = extractEpisodeTokens(getSearchResultText(result));
+  if (requestedEpisode?.season && requestedEpisode?.episode) {
+    if (episodes.some((item) => item.season === requestedEpisode.season && item.episode === requestedEpisode.episode)) {
+      score += 120;
+    }
+  } else if (episodes.length) {
+    score += 12;
+  }
+
+  return score;
+}
+
+function getSearchResultGroupKey(result, needles) {
+  // 6.9 生成片名分组键
+  const text = normalizeComparableText(getSearchResultText(result));
+  const matched = needles.find((needle) => text.includes(needle.normalized));
+  if (matched) return matched.normalized;
+  return normalizeComparableText(stripEpisodeTokens(result.title || result.fileName || ""));
+}
+
+function getSearchResultEpisodeKey(result) {
+  // 6.10 生成季集排序键
+  const episodes = extractEpisodeTokens(getSearchResultText(result));
+  if (!episodes.length) return 999999;
+  return episodes[0].season * 1000 + episodes[0].episode;
+}
+
+function getSourceOrder(source) {
+  // 6.11 固定字幕源排序
+  const order = ["thunder", "subtitlecat", "tvsubtitles", "subf2m", "yify", "moviesubtitles"];
+  const index = order.indexOf(source);
+  return index >= 0 ? index : order.length;
+}
+
+function getSearchResultText(result) {
+  // 6.12 拼接搜索结果可比较文本
+  return [result.title, result.fileName, result.extra].filter(Boolean).join(" ");
+}
+
+function normalizeComparableText(value) {
+  // 6.13 统一比较文本格式
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function filterResultsByEpisode(results, episode) {
@@ -396,6 +516,9 @@ function extractEpisodeTokens(text) {
     tokens.push({ season: Number(match[1]), episode: Number(match[2]) });
   }
   for (const match of normalized.matchAll(/\b0*(\d{1,2})\s*x\s*0*(\d{1,3})\b/gi)) {
+    tokens.push({ season: Number(match[1]), episode: Number(match[2]) });
+  }
+  for (const match of normalized.matchAll(/\bseason\s*0*(\d{1,2})\D{0,12}e(?:p(?:isode)?)?\s*0*(\d{1,3})\b/gi)) {
     tokens.push({ season: Number(match[1]), episode: Number(match[2]) });
   }
   return tokens;

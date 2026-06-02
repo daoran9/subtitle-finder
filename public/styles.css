@@ -255,6 +255,7 @@ button:hover,
 
 table {
   width: 100%;
+  min-width: 620px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -262,9 +263,10 @@ table {
 th,
 td {
   border-bottom: 1px solid var(--line);
-  padding: 10px 12px;
+  padding: 10px;
   text-align: left;
   vertical-align: top;
+  overflow: hidden;
 }
 
 th {
@@ -278,16 +280,22 @@ th {
 
 th:nth-child(1),
 td:nth-child(1) {
-  width: 88px;
+  width: 114px;
 }
 
 th:nth-child(3),
-td:nth-child(3),
+td:nth-child(3) {
+  width: 88px;
+}
+
 th:nth-child(4),
-td:nth-child(4),
+td:nth-child(4) {
+  width: 58px;
+}
+
 th:nth-child(5),
 td:nth-child(5) {
-  width: 78px;
+  width: 70px;
 }
 
 tbody tr {
@@ -308,25 +316,35 @@ tbody tr.is-active {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 60px;
+  width: 100%;
+  min-height: 28px;
   border-radius: 999px;
   background: #e9efe9;
   color: #263328;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
-  padding: 4px 8px;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  padding: 4px 6px;
+  text-align: center;
+  white-space: normal;
 }
 
 .file-button {
+  display: block;
   justify-content: flex-start;
-  max-width: 100%;
+  width: 100%;
   min-height: 0;
   border: 0;
   background: transparent;
   color: var(--ink);
+  font-size: 15px;
   font-weight: 800;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
   padding: 0;
   text-align: left;
+  white-space: normal;
 }
 
 .file-button:hover {
@@ -339,6 +357,7 @@ tbody tr.is-active {
   margin-top: 4px;
   overflow: hidden;
   font-size: 12px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
