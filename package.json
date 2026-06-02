@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.mjs",
     "app": "electron .",
-    "build:win": "electron-builder --win portable --x64",
+    "build:win": "electron-builder --win portable --x64 --publish never",
     "check": "node --check server.mjs && node --check public/app.js && node --check electron/main.mjs"
   },
   "build": {
