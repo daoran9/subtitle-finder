@@ -2,6 +2,8 @@ const state = {
   results: [],
   selectedId: "",
   previewText: "",
+  downloadUrl: "",
+  downloadFileName: "",
 };
 
 const logger = {
@@ -21,7 +23,7 @@ const nodes = {
   previewMeta: document.querySelector("#previewMeta"),
   previewText: document.querySelector("#previewText"),
   copyButton: document.querySelector("#copyButton"),
-  downloadLink: document.querySelector("#downloadLink"),
+  downloadButton: document.querySelector("#downloadButton"),
   recentList: document.querySelector("#recentList"),
   clearRecentButton: document.querySelector("#clearRecentButton"),
 };
@@ -47,13 +49,18 @@ nodes.copyButton.addEventListener("click", async () => {
   await copyPreviewText();
 });
 
-// 1.3 绑定最近搜索清理
+// 1.3 绑定字幕下载按钮
+nodes.downloadButton.addEventListener("click", async () => {
+  await downloadSubtitle();
+});
+
+// 1.4 绑定最近搜索清理
 nodes.clearRecentButton.addEventListener("click", () => {
   localStorage.removeItem("subtitle-finder-recent");
   renderRecent();
 });
 
-// 1.4 渲染最近搜索
+// 1.5 渲染最近搜索
 renderRecent();
 logger.info("页面初始化完成");
 
@@ -185,16 +192,18 @@ async function previewSubtitle(id) {
     state.previewText = data.text || "";
     nodes.previewText.textContent = state.previewText || "字幕内容为空。";
     nodes.previewMeta.textContent = `${data.source} · ${data.fileName} · ${formatBytes(data.size)} · ${data.encoding}`;
-    nodes.downloadLink.href = `/api/download?${params.toString()}`;
-    nodes.downloadLink.setAttribute("aria-disabled", "false");
+    state.downloadUrl = `/api/download?${params.toString()}`;
+    state.downloadFileName = data.fileName || "subtitle.srt";
+    nodes.downloadButton.setAttribute("aria-disabled", "false");
     setStatus("已读取", "ok");
     logger.info("预览字幕完成");
   } catch (error) {
     state.previewText = "";
+    state.downloadUrl = "";
+    state.downloadFileName = "";
     nodes.previewText.textContent = String(error.message || error);
     nodes.previewMeta.textContent = "读取失败";
-    nodes.downloadLink.href = "#";
-    nodes.downloadLink.setAttribute("aria-disabled", "true");
+    nodes.downloadButton.setAttribute("aria-disabled", "true");
     setStatus("失败", "error");
     logger.error("预览字幕失败", error);
   }
@@ -221,6 +230,54 @@ async function copyPreviewText() {
   await navigator.clipboard.writeText(state.previewText);
   setStatus("已复制", "ok");
   logger.info("复制字幕文本完成");
+}
+
+async function downloadSubtitle() {
+  /*
+   * ================================================================================
+   * 步骤5：下载字幕文件
+   * ================================================================================
+   * 目标：
+   * 1) 桌面版弹出保存路径选择框
+   * 2) 浏览器版保留普通下载行为
+   */
+  logger.info("开始下载字幕文件...");
+
+  // 5.1 校验下载地址
+  if (!state.downloadUrl || nodes.downloadButton.getAttribute("aria-disabled") === "true") {
+    setStatus("无文件", "warn");
+    logger.info("下载字幕文件完成: empty");
+    return;
+  }
+
+  // 5.2 桌面版调用 Electron 保存对话框
+  const absoluteUrl = new URL(state.downloadUrl, window.location.href).href;
+  if (window.subtitleFinder?.saveSubtitle) {
+    try {
+      setStatus("保存中", "busy");
+      const result = await window.subtitleFinder.saveSubtitle({
+        downloadUrl: absoluteUrl,
+        fileName: state.downloadFileName || "subtitle.srt",
+      });
+      if (result?.error) throw new Error(result.error);
+      setStatus(result?.saved ? "已保存" : "已取消", result?.saved ? "ok" : "warn");
+      logger.info("下载字幕文件完成: desktop");
+    } catch (error) {
+      setStatus("失败", "error");
+      logger.error("下载字幕文件失败", error);
+    }
+    return;
+  }
+
+  // 5.3 浏览器版使用普通下载链接
+  const link = document.createElement("a");
+  link.href = absoluteUrl;
+  link.download = state.downloadFileName || "subtitle.srt";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setStatus("已下载", "ok");
+  logger.info("下载字幕文件完成: browser");
 }
 
 function addRecent(query) {
