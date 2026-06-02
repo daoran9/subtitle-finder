@@ -1,6 +1,6 @@
 {
   "name": "subtitle-finder",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Local subtitle search desktop app",
   "type": "module",
   "main": "electron/main.mjs",

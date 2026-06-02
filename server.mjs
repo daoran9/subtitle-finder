@@ -16,6 +16,9 @@ const REQUEST_TIMEOUT_MS = 16000;
 const RESULT_CACHE = new Map();
 const YIFY_BASE_URL = "https://yifysubtitles.ch";
 const SUBF2M_BASE_URL = "https://subf2m.co";
+const MOVIE_SUBTITLES_BASE_URL = "https://www.moviesubtitles.org";
+const MOVIE_SUBTITLES_SEARCH_URL = "https://www.moviesubtitles.org/search.php";
+const TV_SUBTITLES_BASE_URL = "https://www.tvsubtitles.net";
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
 let runtimePort = DEFAULT_PORT;
 
@@ -42,6 +45,17 @@ const yifyLanguageAliases = {
 const subf2mLanguagePaths = {
   en: "english",
   ja: "japanese",
+};
+
+const movieSubtitlesLanguageCodes = {
+  en: "en",
+};
+
+const tvSubtitlesLanguageCodes = {
+  "zh-CN": "cn",
+  "zh-TW": "cn",
+  en: "en",
+  ja: "jp",
 };
 
 /*
@@ -170,6 +184,12 @@ async function handleSearch(url, res) {
   }
   if (source === "all" || source === "subf2m") {
     selectedSources.push((sourceLimit) => searchSubf2m(query, language, sourceLimit));
+  }
+  if (source === "all" || source === "moviesubtitles") {
+    selectedSources.push((sourceLimit) => searchMovieSubtitles(query, language, sourceLimit));
+  }
+  if (source === "all" || source === "tvsubtitles") {
+    selectedSources.push((sourceLimit) => searchTvSubtitles(query, language, sourceLimit));
   }
 
   // 3.3 并发查询字幕源
@@ -544,6 +564,217 @@ function parseSubf2mRows(html, movie, languagePath) {
   });
 }
 
+async function searchMovieSubtitles(query, language, limit) {
+  /*
+   * ================================================================================
+   * 步骤10：查询 MovieSubtitles.org
+   * ================================================================================
+   * 目标：
+   * 1) 搜索普通电影字幕
+   * 2) 进入电影页解析指定语言字幕
+   * 3) 返回可预览的 ZIP 字幕结果
+   */
+  logger.info("开始查询 MovieSubtitles.org...");
+
+  // 10.1 校验语言支持
+  const languageCode = movieSubtitlesLanguageCodes[language];
+  if (!languageCode) {
+    logger.info("查询 MovieSubtitles.org 完成: 当前语言不支持");
+    return [];
+  }
+
+  // 10.2 请求电影搜索页
+  const searchUrl = new URL(MOVIE_SUBTITLES_SEARCH_URL);
+  searchUrl.searchParams.set("q", query);
+  const response = await fetchWithTimeout(searchUrl.href, {
+    headers: { ...browserHeaders, "accept-language": "en-US,en;q=0.9" },
+    allowErrorStatus: true,
+  });
+  const html = await response.text();
+  const movies = parseMovieSubtitlesMovies(html).slice(0, 3);
+
+  // 10.3 进入电影页解析字幕条目
+  const results = [];
+  for (const movie of movies) {
+    const pageResponse = await fetchWithTimeout(movie.detailUrl, {
+      headers: { ...browserHeaders, referer: MOVIE_SUBTITLES_BASE_URL },
+    });
+    const pageHtml = await pageResponse.text();
+    results.push(...parseMovieSubtitlesRows(pageHtml, movie, languageCode));
+    if (results.length >= limit) break;
+  }
+
+  logger.info(`查询 MovieSubtitles.org 完成: ${results.length} 条`);
+  return results.slice(0, limit);
+}
+
+function parseMovieSubtitlesMovies(html) {
+  // 10.4 解析电影搜索结果
+  const matches = [...html.matchAll(/<a\s+[^>]*href=["']([^"']*movie-\d+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi)];
+  return matches.map((match) => ({
+    title: htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim(),
+    detailUrl: new URL(htmlDecode(match[1]), MOVIE_SUBTITLES_BASE_URL).href,
+  })).filter((movie) => movie.title);
+}
+
+function parseMovieSubtitlesRows(html, movie, languageCode) {
+  // 10.5 解析电影字幕列表
+  const matches = [...html.matchAll(/<a\s+[^>]*href=["']([^"']*subtitle-\d+\.html)["'][^>]*title=["']Download\s+([^"']+?)\s+subtitles["'][^>]*>/gi)];
+  const unique = new Map();
+
+  for (const match of matches) {
+    const href = htmlDecode(match[1]);
+    const languageName = htmlDecode(match[2]).trim();
+    const detailUrl = new URL(href, MOVIE_SUBTITLES_BASE_URL).href;
+    if (unique.has(detailUrl) || !movieSubtitlesLanguageMatches(languageName, languageCode)) {
+      continue;
+    }
+
+    const index = match.index || 0;
+    const snippet = html.slice(index, index + 1800);
+    const title = htmlDecode(stripTags(matchFirst(snippet, /<b>([\s\S]*?)<\/b>/i)))
+      .replace(/\s+/g, " ")
+      .trim() || movie.title;
+    const redScore = Number(matchFirst(snippet, /<span[^>]*color:\s*red[^>]*>(-?\d+)<\/span>/i) || 0);
+    const greenScore = Number(matchFirst(snippet, /<span[^>]*color:\s*green[^>]*>(-?\d+)<\/span>/i) || 0);
+    const downloads = matchFirst(snippet, /title=["']downloaded["'][\s\S]*?<td[^>]*>([^<]+)<\/td>/i).trim();
+    const size = matchFirst(snippet, /title=["']size["'][\s\S]*?<td[^>]*>([^<]+)<\/td>/i).trim();
+    if (/^0(?:\.0+)?\s*kb$/i.test(size)) {
+      continue;
+    }
+
+    unique.set(detailUrl, {
+      source: "moviesubtitles",
+      sourceLabel: "MovieSubtitles",
+      title,
+      fileName: sanitizeFileName(`${title}.srt`),
+      ext: "srt",
+      language: languageName,
+      score: greenScore - redScore,
+      downloads,
+      size,
+      duration: "",
+      extra: movie.title,
+      downloadUrl: "",
+      detailUrl,
+    });
+  }
+
+  return [...unique.values()];
+}
+
+function movieSubtitlesLanguageMatches(languageName, languageCode) {
+  // 10.6 判断电影源语言是否匹配
+  const lower = String(languageName || "").toLowerCase();
+  return languageCode === "en" ? lower === "english" : false;
+}
+
+async function searchTvSubtitles(query, language, limit) {
+  /*
+   * ================================================================================
+   * 步骤11：查询 TVSubtitles.net
+   * ================================================================================
+   * 目标：
+   * 1) 搜索普通剧集字幕
+   * 2) 进入剧集季页解析每集字幕
+   * 3) 返回可预览的 ZIP 字幕结果
+   */
+  logger.info("开始查询 TVSubtitles.net...");
+
+  // 11.1 校验语言支持
+  const languageCode = tvSubtitlesLanguageCodes[language];
+  if (!languageCode) {
+    logger.info("查询 TVSubtitles.net 完成: 当前语言不支持");
+    return [];
+  }
+
+  // 11.2 请求剧集搜索页
+  const response = await fetchWithTimeout(new URL("/search1.php", TV_SUBTITLES_BASE_URL).href, {
+    method: "POST",
+    headers: { ...browserHeaders, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ qs: query }).toString(),
+  });
+  const html = await response.text();
+  const shows = parseTvSubtitlesShows(html).slice(0, 3);
+  const season = parseSeasonFromQuery(query);
+
+  // 11.3 进入季页解析字幕条目
+  const results = [];
+  for (const show of shows) {
+    const pageUrl = season ? buildTvSubtitlesSeasonUrl(show.detailUrl, season) : show.detailUrl;
+    const pageResponse = await fetchWithTimeout(pageUrl, {
+      headers: { ...browserHeaders, referer: TV_SUBTITLES_BASE_URL },
+    });
+    const pageHtml = await pageResponse.text();
+    results.push(...parseTvSubtitlesRows(pageHtml, show, languageCode));
+    if (results.length >= limit) break;
+  }
+
+  logger.info(`查询 TVSubtitles.net 完成: ${results.length} 条`);
+  return results.slice(0, limit);
+}
+
+function parseTvSubtitlesShows(html) {
+  // 11.4 解析剧集搜索结果
+  const matches = [...html.matchAll(/<a\s+[^>]*href=["']([^"']*tvshow-\d+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi)];
+  return matches.map((match) => ({
+    title: htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim(),
+    detailUrl: new URL(htmlDecode(match[1]), TV_SUBTITLES_BASE_URL).href,
+  })).filter((show) => show.title);
+}
+
+function buildTvSubtitlesSeasonUrl(showUrl, season) {
+  // 11.5 根据搜索词中的季数构造季页
+  return showUrl.replace(/tvshow-(\d+)(?:-\d+)?\.html/i, `tvshow-$1-${season}.html`);
+}
+
+function parseSeasonFromQuery(query) {
+  // 11.6 从 S01E02 或 1x02 形式提取季数
+  const normalized = String(query || "");
+  const sxe = normalized.match(/\bs0*(\d{1,2})\s*e0*\d{1,2}\b/i);
+  if (sxe) return Number(sxe[1]);
+  const nxm = normalized.match(/\b0*(\d{1,2})\s*x\s*0*\d{1,2}\b/i);
+  return nxm ? Number(nxm[1]) : 0;
+}
+
+function parseTvSubtitlesRows(html, show, languageCode) {
+  // 11.7 解析剧集字幕列表
+  const rows = [...html.matchAll(/<tr\b[^>]*>\s*<td>(\d+x\d+)<\/td>\s*<td[^>]*>\s*<a\s+[^>]*href=["'][^"']*episode-\d+\.html["'][^>]*>\s*<b>([\s\S]*?)<\/b>\s*<\/a>\s*<\/td>\s*<td>(\d+)<\/td>\s*<td>([\s\S]*?)<\/td>\s*<\/tr>/gi)];
+  const results = [];
+
+  for (const row of rows) {
+    const episodeNumber = htmlDecode(row[1]).trim();
+    const episodeTitle = htmlDecode(stripTags(row[2])).replace(/\s+/g, " ").trim();
+    const amount = htmlDecode(row[3]).trim();
+    const subtitlesCell = row[4];
+    const links = [...subtitlesCell.matchAll(/<a\s+[^>]*href=["']([^"']*subtitle-\d+\.html)["'][^>]*>\s*<img[^>]*alt=["']([^"']+)["'][^>]*>/gi)];
+
+    for (const link of links) {
+      const siteLanguage = htmlDecode(link[2]).trim().toLowerCase();
+      if (siteLanguage !== languageCode) continue;
+
+      const title = `${show.title} ${episodeNumber} ${episodeTitle}`.trim();
+      results.push({
+        source: "tvsubtitles",
+        sourceLabel: "TVSubtitles",
+        title,
+        fileName: sanitizeFileName(`${title}.${siteLanguage}.srt`),
+        ext: "srt",
+        language: siteLanguage,
+        score: "",
+        downloads: amount,
+        size: "",
+        duration: "",
+        extra: show.title,
+        downloadUrl: "",
+        detailUrl: new URL(htmlDecode(link[1]), TV_SUBTITLES_BASE_URL).href,
+      });
+    }
+  }
+
+  return results;
+}
+
 async function fetchSubtitleBytes(result, language) {
   /*
    * ================================================================================
@@ -648,8 +879,65 @@ async function resolveDownloadUrl(result, language) {
     }
   }
 
+  // 11.5 解析 MovieSubtitles 详情页
+  if (result.source === "moviesubtitles" && result.detailUrl) {
+    const response = await fetchWithTimeout(result.detailUrl, {
+      headers: { ...browserHeaders, referer: MOVIE_SUBTITLES_BASE_URL },
+    });
+    const html = await response.text();
+    const href = matchFirst(html, /href=["']([^"']*download-\d+\.html)["']/i);
+    if (href) {
+      const resolved = new URL(htmlDecode(href), result.detailUrl).href;
+      result.downloadUrl = resolved;
+      logger.info("解析真实下载地址完成: moviesubtitles");
+      return resolved;
+    }
+  }
+
+  // 11.6 解析 TVSubtitles 详情页和等待页
+  if (result.source === "tvsubtitles" && result.detailUrl) {
+    const detailResponse = await fetchWithTimeout(result.detailUrl, {
+      headers: { ...browserHeaders, referer: TV_SUBTITLES_BASE_URL },
+    });
+    const detailHtml = await detailResponse.text();
+    const href = matchFirst(detailHtml, /href=["']([^"']*download-\d+\.html)["']/i);
+    if (href) {
+      const downloadPageUrl = new URL(htmlDecode(href), result.detailUrl).href;
+      const downloadResponse = await fetchWithTimeout(downloadPageUrl, {
+        headers: { ...browserHeaders, referer: result.detailUrl },
+      });
+      const downloadHtml = await downloadResponse.text();
+      const zipPath = parseJavaScriptLocation(downloadHtml);
+      const resolved = zipPath ? new URL(zipPath, downloadPageUrl).href : downloadPageUrl;
+      result.downloadUrl = resolved;
+      logger.info("解析真实下载地址完成: tvsubtitles");
+      return resolved;
+    }
+  }
+
   logger.info("解析真实下载地址完成: empty");
   return "";
+}
+
+function parseJavaScriptLocation(html) {
+  // 11.7 解析旧站下载页的 document.location 拼接表达式
+  const variables = {};
+  for (const match of html.matchAll(/var\s+([a-zA-Z_$][\w$]*)\s*=\s*(['"])(.*?)\2\s*;/g)) {
+    variables[match[1]] = match[3];
+  }
+
+  const expression = matchFirst(html, /document\.location\s*=\s*([^;]+);/i);
+  if (!expression) return "";
+
+  return expression
+    .split("+")
+    .map((part) => {
+      const key = part.trim();
+      const quoted = key.match(/^(['"])(.*?)\1$/);
+      if (quoted) return quoted[2];
+      return Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : "";
+    })
+    .join("");
 }
 
 function extractSubtitlePayload(buffer, contentType, fileName, language) {
@@ -844,11 +1132,12 @@ async function serveStatic(url, res) {
 
 async function fetchWithTimeout(url, options = {}) {
   // 6.3 带超时请求远程资源
+  const { allowErrorStatus = false, ...fetchOptions } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    if (!response.ok) {
+    const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+    if (!response.ok && !allowErrorStatus) {
       throw new Error(`HTTP ${response.status}: ${url}`);
     }
     return response;

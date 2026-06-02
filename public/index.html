@@ -18,14 +18,14 @@
             <div class="brand-mark" aria-hidden="true">S</div>
             <div>
               <h1>字幕检索台</h1>
-              <p>按字段、文件名、番号搜索字幕</p>
+              <p>按片名、剧集名、文件名搜索字幕</p>
             </div>
           </div>
 
           <form id="searchForm" class="search-form">
             <label for="queryInput">搜索字段</label>
             <div class="input-stack">
-              <input id="queryInput" name="q" autocomplete="off" placeholder="例如 PRED-483 / movie name" />
+              <input id="queryInput" name="q" autocomplete="off" />
               <button type="submit" title="搜索">
                 <span aria-hidden="true">⌕</span>
                 <span>搜索</span>
@@ -41,6 +41,8 @@
                   <option value="subtitlecat">SubtitleCat</option>
                   <option value="yify">YIFY Subtitles</option>
                   <option value="subf2m">Subf2m</option>
+                  <option value="moviesubtitles">MovieSubtitles</option>
+                  <option value="tvsubtitles">TVSubtitles</option>
                 </select>
               </label>
               <label>
@@ -57,7 +59,7 @@
 
           <div class="hint-block">
             <span class="hint-title">使用方式</span>
-            <p>输入视频名或番号，点结果即可预览字幕内容。</p>
+            <p>输入片名、剧集名或文件名，点结果即可预览字幕内容。</p>
           </div>
 
           <div class="recent-block">

@@ -1,6 +1,6 @@
 # 字幕检索台
 
-本地字幕搜索工具。输入文件名、番号或任意字段后，工具会查询多个免费字幕源。
+本地字幕搜索工具。输入片名、剧集名、文件名或任意字段后，工具会查询多个免费字幕源。
 
 ## 字幕源
 
@@ -8,6 +8,8 @@
 - SubtitleCat
 - YIFY Subtitles
 - Subf2m
+- MovieSubtitles
+- TVSubtitles
 
 ## 启动
 
@@ -61,7 +63,7 @@ https://github.com/<user>/<repo>/releases/latest
 
 ## 功能
 
-- 按字段或文件名搜索字幕
+- 按片名、剧集名或文件名搜索字幕
 - 切换字幕源
 - 切换目标语言
 - 点击结果预览 SRT 内容
