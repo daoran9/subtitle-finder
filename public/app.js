@@ -445,10 +445,11 @@ function clearPreview() {
   // 2.5 清空预览状态
   state.selectedId = "";
   state.previewText = "";
+  state.downloadUrl = "";
+  state.downloadFileName = "";
   nodes.previewMeta.textContent = "未选择字幕";
   nodes.previewText.textContent = "点击左侧结果查看字幕内容。";
-  nodes.downloadLink.href = "#";
-  nodes.downloadLink.setAttribute("aria-disabled", "true");
+  nodes.downloadButton.setAttribute("aria-disabled", "true");
 }
 
 function setStatus(text, tone) {
