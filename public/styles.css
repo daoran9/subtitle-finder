@@ -55,6 +55,13 @@ select {
   box-shadow: var(--shadow);
 }
 
+.results-pane,
+.preview-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .search-rail {
   padding: 18px;
 }
@@ -174,7 +181,8 @@ button:hover,
 }
 
 .hint-block,
-.recent-block {
+.recent-block,
+.video-block {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
@@ -209,6 +217,42 @@ button:hover,
   background: var(--panel-strong);
   color: var(--ink);
   padding: 0 9px;
+}
+
+.video-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.video-list button {
+  display: grid;
+  justify-items: start;
+  min-height: 0;
+  border-color: var(--line);
+  background: var(--panel-strong);
+  color: var(--ink);
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.video-list span {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-list small {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pane-header {
@@ -248,14 +292,78 @@ button:hover,
   color: var(--red);
 }
 
+.results-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#batchDownloadButton[aria-disabled="true"] {
+  pointer-events: none;
+  border-color: var(--line);
+  background: var(--panel-strong);
+  color: var(--muted);
+}
+
+.source-stats {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfa;
+  padding: 8px 10px;
+}
+
+.source-stat {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 8px;
+  min-width: 128px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  padding: 7px 8px;
+}
+
+.source-stat span {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-stat b {
+  color: var(--accent-dark);
+  font-size: 12px;
+  text-align: right;
+}
+
+.source-stat small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.source-stat[data-status="busy"] b {
+  color: var(--amber);
+}
+
+.source-stat[data-status="timeout"] b,
+.source-stat[data-status="error"] b {
+  color: var(--red);
+}
+
 .table-wrap {
-  height: calc(100vh - 108px);
+  flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 
 table {
   width: 100%;
-  min-width: 620px;
+  min-width: 500px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -280,22 +388,39 @@ th {
 
 th:nth-child(1),
 td:nth-child(1) {
-  width: 114px;
+  width: 42px;
 }
 
-th:nth-child(3),
-td:nth-child(3) {
-  width: 88px;
+th:nth-child(2),
+td:nth-child(2) {
+  width: 100px;
 }
 
 th:nth-child(4),
 td:nth-child(4) {
-  width: 58px;
+  width: 76px;
 }
 
 th:nth-child(5),
 td:nth-child(5) {
-  width: 70px;
+  width: 52px;
+}
+
+th:nth-child(6),
+td:nth-child(6) {
+  width: 60px;
+}
+
+.select-col,
+.select-cell {
+  text-align: center;
+}
+
+.select-col input,
+.select-cell input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
 }
 
 tbody tr {
@@ -374,7 +499,8 @@ tbody tr.is-active {
 }
 
 .preview-text {
-  height: calc(100vh - 108px);
+  flex: 1;
+  min-height: 0;
   margin: 0;
   overflow: auto;
   padding: 16px;
@@ -412,7 +538,6 @@ tbody tr.is-active {
 
   .table-wrap,
   .preview-text {
-    height: auto;
     max-height: 60vh;
   }
 
@@ -451,7 +576,8 @@ tbody tr.is-active {
   td:nth-child(2),
   td:nth-child(3),
   td:nth-child(4),
-  td:nth-child(5) {
+  td:nth-child(5),
+  td:nth-child(6) {
     width: 100%;
   }
 
@@ -462,22 +588,26 @@ tbody tr.is-active {
   }
 
   td:nth-child(1)::before {
-    content: "来源";
+    content: "选择";
   }
 
   td:nth-child(2)::before {
-    content: "文件";
+    content: "来源";
   }
 
   td:nth-child(3)::before {
-    content: "语言";
+    content: "文件";
   }
 
   td:nth-child(4)::before {
-    content: "分数";
+    content: "语言";
   }
 
   td:nth-child(5)::before {
+    content: "分数";
+  }
+
+  td:nth-child(6)::before {
     content: "下载";
   }
 

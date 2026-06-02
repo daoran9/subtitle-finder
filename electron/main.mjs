@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../server.mjs";
@@ -7,6 +7,8 @@ import { startServer } from "../server.mjs";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const APP_ICON_PATH = path.join(__dirname, "..", "build", "icon.ico");
+const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"]);
+const MAX_VIDEO_SCAN_COUNT = 500;
 
 let mainWindow = null;
 let runtimeServer = null;
@@ -103,7 +105,42 @@ logger.info("字幕保存目录接口绑定完成");
 
 /*
  * ================================================================================
- * 步骤3：保存字幕文件
+ * 步骤3：选择并扫描视频目录
+ * ================================================================================
+ * 目标：
+ * 1) 接收前端扫描视频目录请求
+ * 2) 递归读取常见视频文件
+ * 3) 返回可用于搜索字幕的文件名字段
+ */
+logger.info("开始绑定视频目录扫描接口...");
+
+// 3.1 绑定视频目录选择接口
+ipcMain.handle("subtitle:select-video-dir", async (event) => {
+  logger.info("开始选择视频目录...");
+
+  // 3.2 弹出文件夹选择框
+  const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const selected = await dialog.showOpenDialog(owner, {
+    title: "选择视频文件夹",
+    properties: ["openDirectory"],
+  });
+  if (selected.canceled || !selected.filePaths.length) {
+    logger.info("选择视频目录完成: 用户取消");
+    return { selected: false };
+  }
+
+  // 3.3 扫描视频文件
+  const directory = selected.filePaths[0];
+  const files = await scanVideoFiles(directory);
+  logger.info("选择视频目录完成", directory, files.length);
+  return { selected: true, directory, files };
+});
+
+logger.info("视频目录扫描接口绑定完成");
+
+/*
+ * ================================================================================
+ * 步骤4：保存字幕文件
  * ================================================================================
  * 目标：
  * 1) 接收前端传入的下载地址、文件名和保存目录
@@ -112,11 +149,11 @@ logger.info("字幕保存目录接口绑定完成");
  */
 logger.info("开始绑定字幕保存接口...");
 
-// 3.1 绑定保存接口
+// 4.1 绑定保存接口
 ipcMain.handle("subtitle:save", async (event, payload = {}) => {
   logger.info("开始保存字幕文件...");
 
-  // 3.2 读取保存参数
+  // 4.2 读取保存参数
   const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
   const downloadUrl = String(payload.downloadUrl || "");
   const defaultFileName = path.basename(String(payload.fileName || "subtitle.srt"));
@@ -126,7 +163,7 @@ ipcMain.handle("subtitle:save", async (event, payload = {}) => {
     return { saved: false, error: "没有可下载的字幕" };
   }
 
-  // 3.3 确认保存路径
+  // 4.3 确认保存路径
   let targetPath = "";
   if (downloadDir) {
     await mkdir(downloadDir, { recursive: true });
@@ -147,7 +184,7 @@ ipcMain.handle("subtitle:save", async (event, payload = {}) => {
     targetPath = selected.filePath;
   }
 
-  // 3.4 下载并写入文件
+  // 4.4 下载并写入文件
   const response = await fetch(downloadUrl);
   if (!response.ok) {
     logger.info("保存字幕文件完成: 下载失败", response.status);
@@ -194,9 +231,79 @@ async function resolveAvailableSubtitlePath(directory, fileName) {
   return path.join(directory, `${baseName}-${Date.now()}${extension || ".srt"}`);
 }
 
+async function scanVideoFiles(directory) {
+  /*
+   * ================================================================================
+   * 步骤5：扫描视频文件
+   * ================================================================================
+   * 目标：
+   * 1) 递归读取目录下常见视频扩展名
+   * 2) 控制最多返回数量，避免大目录卡住界面
+   */
+  logger.info("开始扫描视频文件...");
+
+  // 5.1 深度优先扫描目录
+  const results = [];
+  const stack = [directory];
+  while (stack.length && results.length < MAX_VIDEO_SCAN_COUNT) {
+    const current = stack.pop();
+    let entries = [];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch (error) {
+      logger.error("读取视频目录失败", current, error);
+      continue;
+    }
+
+    // 5.2 收集视频文件
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile() || !VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+      results.push({
+        name: entry.name,
+        path: fullPath,
+        query: buildVideoSearchQuery(entry.name),
+      });
+      if (results.length >= MAX_VIDEO_SCAN_COUNT) break;
+    }
+  }
+
+  logger.info("扫描视频文件完成", results.length);
+  return results;
+}
+
+function buildVideoSearchQuery(fileName) {
+  /*
+   * ================================================================================
+   * 步骤6：生成视频搜索词
+   * ================================================================================
+   * 目标：
+   * 1) 移除扩展名、清晰度和编码噪声
+   * 2) 保留片名、番号、季集号等有效字段
+   */
+  logger.info("开始生成视频搜索词...");
+
+  // 6.1 清洗常见发布组噪声
+  const baseName = path.basename(fileName, path.extname(fileName));
+  const query = baseName
+    .replace(/\[[^\]]*\]|\([^\)]*\)/g, " ")
+    .replace(/[._]+/g, " ")
+    .replace(/\b(2160p|1080p|720p|480p|4k|hdr|web[- ]?dl|webrip|bluray|brrip|hdtv|dvdrip|x264|x265|h264|h265|hevc|aac|ddp?\d?(?:\.\d)?|10bit|8bit)\b/gi, " ")
+    .replace(/\b(complete|proper|repack|internal|multi|chs|cht|eng|jpn)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  logger.info("生成视频搜索词完成", query || baseName);
+  return query || baseName;
+}
+
 /*
  * ================================================================================
- * 步骤5：绑定应用生命周期
+ * 步骤7：绑定应用生命周期
  * ================================================================================
  * 目标：
  * 1) Electron 就绪后启动窗口

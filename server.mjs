@@ -21,6 +21,9 @@ const SUBF2M_BASE_URL = "https://subf2m.co";
 const MOVIE_SUBTITLES_BASE_URL = "https://www.moviesubtitles.org";
 const MOVIE_SUBTITLES_SEARCH_URL = "https://www.moviesubtitles.org/search.php";
 const TV_SUBTITLES_BASE_URL = "https://www.tvsubtitles.net";
+const ADDIC7ED_BASE_URL = "https://www.addic7ed.com";
+const AV_SUBTITLES_BASE_URL = "https://www.avsubtitles.com";
+const AIYI_BASE_URL = "https://www.aiyi1.com";
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
 let runtimePort = DEFAULT_PORT;
 
@@ -62,8 +65,26 @@ const tvSubtitlesLanguageCodes = {
 
 const TITLE_ALIAS_GROUPS = [
   ["Daria", "拽妹黛薇儿", "拽妹黛薇兒", "拽妹黛薇尔"],
+  ["Friends", "老友记", "老友記", "六人行"],
+  ["The Big Bang Theory", "生活大爆炸", "天才理论传"],
+  ["Game of Thrones", "权力的游戏", "權力的遊戲", "冰与火之歌"],
+  ["Breaking Bad", "绝命毒师", "絕命毒師", "制毒师"],
+  ["Better Call Saul", "风骚律师", "絕命律師", "绝命律师"],
+  ["The Simpsons", "辛普森一家", "辛普森家庭"],
+  ["Futurama", "飞出个未来", "飛出個未來"],
+  ["Rick and Morty", "瑞克和莫蒂", "瑞克与莫蒂"],
+  ["South Park", "南方公园", "南方四贱客"],
+  ["Stranger Things", "怪奇物语", "怪奇物語"],
+  ["The Office", "办公室", "辦公室", "爆笑办公室"],
+  ["House M.D.", "House", "豪斯医生", "怪医豪斯"],
+  ["Sherlock", "神探夏洛克", "新福尔摩斯"],
+  ["Doctor Who", "神秘博士", "异世奇人"],
+  ["Black Mirror", "黑镜", "黑鏡"],
+  ["Westworld", "西部世界"],
+  ["The Last of Us", "最后生还者", "最後生還者"],
+  ["The Bear", "熊家餐馆", "大熊餐厅"],
 ];
-const MAX_QUERY_VARIANTS = 8;
+const MAX_QUERY_VARIANTS = 12;
 const MAX_TV_SEASON_PAGES = 12;
 
 /*
@@ -182,49 +203,150 @@ async function handleSearch(url, res) {
 
   // 3.2 按选择组装字幕源
   const queryVariants = buildQueryVariants(query);
-  const selectedSources = [];
-  if (source === "all" || source === "thunder") {
-    selectedSources.push({ name: "迅雷字幕", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)) });
-  }
-  if (source === "all" || source === "subtitlecat") {
-    selectedSources.push({ name: "SubtitleCat", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)) });
-  }
-  if (source === "all" || source === "yify") {
-    selectedSources.push({ name: "YIFY Subtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchYify(variant, language, sourceLimit)) });
-  }
-  if (source === "all" || source === "subf2m") {
-    selectedSources.push({ name: "Subf2m", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubf2m(variant, language, sourceLimit)) });
-  }
-  if (source === "all" || source === "moviesubtitles") {
-    selectedSources.push({ name: "MovieSubtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchMovieSubtitles(variant, language, sourceLimit)) });
-  }
-  if (source === "all" || source === "tvsubtitles") {
-    selectedSources.push({ name: "TVSubtitles", search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchTvSubtitles(variant, language, sourceLimit)) });
-  }
+  const selectedSources = buildSelectedSearchSources({ source, queryVariants, language });
 
   // 3.3 并发查询字幕源
   const perSourceLimit = requestedEpisode.season && requestedEpisode.episode ? 100 : limit;
-  const tasks = selectedSources.map((sourceItem) => searchSourceWithTimeout(sourceItem.name, () => sourceItem.search(perSourceLimit)));
-
-  const settled = await settleAllSearchSourcesWithTimeout(tasks);
-  const errors = settled
-    .filter((item) => item.status === "rejected")
-    .map((item) => String(item.reason?.message || item.reason));
-  const resultBuckets = settled
-    .filter((item) => item.status === "fulfilled")
-    .map((item) => filterResultsByEpisode(item.value.filter(Boolean), requestedEpisode));
+  const tasks = selectedSources.map((sourceItem) =>
+    searchSourceWithTimeout(sourceItem.name, () => sourceItem.search(perSourceLimit), sourceItem.timeoutMs)
+  );
+  const settled = await settleAllSearchSourcesWithTimeout(tasks, getOverallSearchTimeoutMs(selectedSources, source));
+  const filteredBuckets = settled.map((item) =>
+    item.status === "fulfilled" ? filterResultsByEpisode(item.value.results.filter(Boolean), requestedEpisode) : []
+  );
+  const sourceStats = buildSourceStats(selectedSources, settled, filteredBuckets);
+  const errors = sourceStats
+    .filter((item) => item.status !== "done")
+    .map((item) => `${item.sourceLabel}: ${item.message}`);
+  const resultBuckets = filteredBuckets.filter((bucket) => bucket.length);
   const publicResults = mergeSearchResultBuckets(resultBuckets, limit, { queryVariants, requestedEpisode, balanced: source === "all" })
     .map(cacheResult);
 
   // 3.4 返回结果
-  sendJson(res, 200, { query, source, language, variants: queryVariants, count: publicResults.length, results: publicResults, errors });
+  sendJson(res, 200, { query, source, language, variants: queryVariants, count: publicResults.length, results: publicResults, errors, sourceStats });
   logger.info(`搜索字幕完成: ${publicResults.length} 条`);
 }
 
-async function settleAllSearchSourcesWithTimeout(tasks) {
+function buildSelectedSearchSources({ source, queryVariants, language }) {
   /*
    * ================================================================================
-   * 步骤4：限制整次搜索耗时
+   * 步骤4：组装搜索源
+   * ================================================================================
+   * 目标：
+   * 1) 按用户选择生成统一字幕源配置
+   * 2) 保留 key、名称和搜索函数，供状态面板复用
+   */
+  logger.info("开始组装搜索源...");
+
+  // 4.1 定义可用字幕源
+  const availableSources = [
+    {
+      key: "thunder",
+      name: "迅雷字幕",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)),
+    },
+    {
+      key: "subtitlecat",
+      name: "SubtitleCat",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)),
+    },
+    {
+      key: "yify",
+      name: "YIFY Subtitles",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchYify(variant, language, sourceLimit)),
+    },
+    {
+      key: "subf2m",
+      name: "Subf2m",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubf2m(variant, language, sourceLimit)),
+    },
+    {
+      key: "moviesubtitles",
+      name: "MovieSubtitles",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchMovieSubtitles(variant, language, sourceLimit)),
+    },
+    {
+      key: "tvsubtitles",
+      name: "TVSubtitles",
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchTvSubtitles(variant, language, sourceLimit)),
+    },
+    {
+      key: "addic7ed",
+      name: "Addic7ed",
+      includeInAll: false,
+      timeoutMs: 42000,
+      search: (sourceLimit) =>
+        searchWithQueryVariants(filterLatinQueryVariants(queryVariants), sourceLimit, (variant) => searchAddic7ed(variant, language, sourceLimit)),
+    },
+    {
+      key: "avsubtitles",
+      name: "AVSubtitles",
+      includeInAll: false,
+      timeoutMs: 16000,
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAvSubtitles(variant, language, sourceLimit)),
+    },
+    {
+      key: "aiyi",
+      name: "爱译网",
+      includeInAll: false,
+      timeoutMs: 12000,
+      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAiyi(variant, language, sourceLimit)),
+    },
+  ];
+
+  // 4.2 按选择过滤字幕源
+  const selected = source === "all" ? availableSources.filter((item) => item.includeInAll !== false) : availableSources.filter((item) => item.key === source);
+  logger.info(`组装搜索源完成: ${selected.map((item) => item.name).join(", ") || "empty"}`);
+  return selected;
+}
+
+function filterLatinQueryVariants(queryVariants) {
+  /*
+   * ================================================================================
+   * 步骤5：筛选英文查询变体
+   * ================================================================================
+   * 目标：
+   * 1) 给只支持英文标题的字幕源使用
+   * 2) 避免中文别名造成无效慢请求
+   */
+  logger.info("开始筛选英文查询变体...");
+
+  // 5.1 保留含拉丁字符的变体
+  const variants = queryVariants.filter((item) => /[A-Za-z]/.test(stripEpisodeTokens(item)));
+  const selected = variants.length ? variants : queryVariants.slice(0, 1);
+
+  logger.info(`筛选英文查询变体完成: ${selected.join(" | ")}`);
+  return selected;
+}
+
+function getOverallSearchTimeoutMs(selectedSources, source) {
+  /*
+   * ================================================================================
+   * 步骤6：计算整次搜索超时
+   * ================================================================================
+   * 目标：
+   * 1) 默认全部搜索维持短超时
+   * 2) 手动选择慢源时给足单源执行时间
+   */
+  logger.info("开始计算整次搜索超时...");
+
+  // 6.1 默认全部搜索使用全局超时
+  if (source === "all") {
+    logger.info("计算整次搜索超时完成", OVERALL_SEARCH_TIMEOUT_MS);
+    return OVERALL_SEARCH_TIMEOUT_MS;
+  }
+
+  // 6.2 单源搜索按源级超时上浮
+  const maxSourceTimeout = Math.max(...selectedSources.map((item) => Number(item.timeoutMs || SOURCE_SEARCH_TIMEOUT_MS)), SOURCE_SEARCH_TIMEOUT_MS);
+  const timeoutMs = Math.max(OVERALL_SEARCH_TIMEOUT_MS, maxSourceTimeout + 1000);
+  logger.info("计算整次搜索超时完成", timeoutMs);
+  return timeoutMs;
+}
+
+async function settleAllSearchSourcesWithTimeout(tasks, timeoutMs = OVERALL_SEARCH_TIMEOUT_MS) {
+  /*
+   * ================================================================================
+   * 步骤7：限制整次搜索耗时
    * ================================================================================
    * 目标：
    * 1) 避免极端网络状态下搜索接口一直不返回
@@ -232,11 +354,11 @@ async function settleAllSearchSourcesWithTimeout(tasks) {
    */
   logger.info("开始限制整次搜索耗时...");
 
-  // 4.1 收集已经完成的来源结果
+  // 7.1 收集已经完成的来源结果
   const settled = Array.from({ length: tasks.length }, () => null);
   let completed = 0;
   await new Promise((resolve) => {
-    const timer = setTimeout(resolve, OVERALL_SEARCH_TIMEOUT_MS);
+    const timer = setTimeout(resolve, timeoutMs);
     tasks.forEach((task, index) => {
       Promise.resolve(task)
         .then((value) => {
@@ -255,37 +377,99 @@ async function settleAllSearchSourcesWithTimeout(tasks) {
     });
   });
 
-  // 4.2 未完成来源标记为整体超时
-  const results = settled.map((item) => item || { status: "rejected", reason: new Error("搜索整体超时") });
+  // 7.2 未完成来源标记为整体超时
+  const timeoutError = new Error("搜索整体超时");
+  timeoutError.durationMs = timeoutMs;
+  const results = settled.map((item) => item || { status: "rejected", reason: timeoutError });
   logger.info("限制整次搜索耗时完成");
   return results;
 }
 
-async function searchSourceWithTimeout(sourceName, searchTask) {
+async function searchSourceWithTimeout(sourceName, searchTask, timeoutMs = SOURCE_SEARCH_TIMEOUT_MS) {
   /*
    * ================================================================================
-   * 步骤4：限制单源搜索耗时
+   * 步骤6：限制单源搜索耗时
    * ================================================================================
    * 目标：
    * 1) 避免某个字幕源网络卡住拖慢整次搜索
-   * 2) 超时后让其他来源结果先返回
+   * 2) 记录单源耗时供前端展示
    */
   logger.info("开始限制单源搜索耗时...", sourceName);
 
-  // 4.1 创建超时任务
+  // 6.1 创建超时任务
+  const startedAt = Date.now();
   let timer = null;
   const timeoutTask = new Promise((resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${sourceName} 搜索超时`)), SOURCE_SEARCH_TIMEOUT_MS);
+    timer = setTimeout(() => reject(new Error(`${sourceName} 搜索超时`)), timeoutMs);
   });
 
-  // 4.2 执行搜索任务
+  // 6.2 执行搜索任务
   try {
     const results = await Promise.race([searchTask(), timeoutTask]);
     logger.info("限制单源搜索耗时完成", sourceName);
-    return results;
+    return { results, durationMs: Date.now() - startedAt };
+  } catch (error) {
+    error.durationMs = Date.now() - startedAt;
+    logger.info("限制单源搜索耗时完成: 失败", sourceName, error.message);
+    throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function buildSourceStats(selectedSources, settled, filteredBuckets) {
+  /*
+   * ================================================================================
+   * 步骤7：生成源级状态
+   * ================================================================================
+   * 目标：
+   * 1) 把每个字幕源的完成、超时、失败状态返回前端
+   * 2) 展示过滤后的结果数和耗时
+   */
+  logger.info("开始生成源级状态...");
+
+  // 7.1 逐源生成状态项
+  const stats = selectedSources.map((sourceItem, index) => {
+    const item = settled[index];
+    if (item?.status === "fulfilled") {
+      const durationMs = Number(item.value?.durationMs || 0);
+      const count = Array.isArray(filteredBuckets[index]) ? filteredBuckets[index].length : 0;
+      return {
+        source: sourceItem.key,
+        sourceLabel: sourceItem.name,
+        status: "done",
+        statusLabel: "完成",
+        count,
+        durationMs,
+        duration: formatSourceStatDuration(durationMs),
+        message: "",
+      };
+    }
+
+    const message = String(item?.reason?.message || item?.reason || "搜索失败");
+    const status = message.includes("超时") ? "timeout" : "error";
+    const durationMs = Number(item?.reason?.durationMs || OVERALL_SEARCH_TIMEOUT_MS);
+    return {
+      source: sourceItem.key,
+      sourceLabel: sourceItem.name,
+      status,
+      statusLabel: status === "timeout" ? "超时" : "失败",
+      count: 0,
+      durationMs,
+      duration: formatSourceStatDuration(durationMs),
+      message,
+    };
+  });
+
+  logger.info("生成源级状态完成");
+  return stats;
+}
+
+function formatSourceStatDuration(durationMs) {
+  // 7.2 格式化源级耗时
+  if (!durationMs) return "-";
+  if (durationMs < 1000) return `${durationMs}ms`;
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 async function searchWithQueryVariants(queryVariants, limit, searchVariant) {
@@ -617,7 +801,7 @@ async function handlePreview(url, res) {
 
   // 4.2 拉取并解码字幕
   const payload = await fetchSubtitleBytes(result, language);
-  const decoded = decodeSubtitle(payload.buffer, payload.contentType);
+  const decoded = decodeSubtitle(payload.buffer, payload.contentType, language);
 
   // 4.3 返回预览内容
   sendJson(res, 200, {
@@ -1214,6 +1398,421 @@ function tvEpisodeNumberMatches(episodeNumber, episode) {
   return Number(match[1]) === episode.season && Number(match[2]) === episode.episode;
 }
 
+async function searchAddic7ed(query, language, limit) {
+  /*
+   * ================================================================================
+   * 步骤12：查询 Addic7ed 字幕源
+   * ================================================================================
+   * 目标：
+   * 1) 搜索英文剧集字幕
+   * 2) 解析季页表格中的直接下载链接
+   */
+  logger.info("开始查询 Addic7ed 字幕源...");
+
+  // 12.1 Addic7ed 只作为英文字幕源
+  if (language !== "en") {
+    logger.info("查询 Addic7ed 字幕源完成: 语言不支持");
+    return [];
+  }
+
+  // 12.2 查找剧集页面
+  const episode = parseEpisodeQuery(query);
+  const show = await fetchAddic7edShow(query);
+  if (!show?.id) {
+    logger.info("查询 Addic7ed 字幕源完成: 未找到剧集");
+    return [];
+  }
+
+  // 12.3 拉取季页结果
+  const seasons = episode.season ? [episode.season] : show.seasons.slice(0, Math.max(1, Math.min(show.seasons.length, 5)));
+  const results = [];
+  for (const season of seasons) {
+    const seasonHtml = await fetchAddic7edSeasonHtml(show.id, season, show.pageUrl);
+    results.push(...parseAddic7edRows(seasonHtml, show, season, episode));
+    if (results.length >= limit) break;
+  }
+
+  logger.info(`查询 Addic7ed 字幕源完成: ${results.length} 条`);
+  return results.slice(0, limit);
+}
+
+async function fetchAddic7edShow(query) {
+  /*
+   * ================================================================================
+   * 步骤13：查找 Addic7ed 剧集
+   * ================================================================================
+   * 目标：
+   * 1) 用搜索页定位 /show/{id}
+   * 2) 解析剧名和可用季数
+   */
+  logger.info("开始查找 Addic7ed 剧集...");
+
+  // 13.1 请求搜索页
+  const searchUrl = `${ADDIC7ED_BASE_URL}/search.php?search=${encodeURIComponent(stripEpisodeTokens(query).trim() || query)}&Submit=Search`;
+  const response = await fetchWithTimeout(searchUrl, {
+    headers: { ...browserHeaders, referer: ADDIC7ED_BASE_URL },
+    allowErrorStatus: true,
+    timeoutMs: 42000,
+  });
+  if (!response.ok) {
+    logger.info("查找 Addic7ed 剧集完成: 搜索失败", response.status);
+    return null;
+  }
+  const html = await response.text();
+
+  // 13.2 提取剧集 ID 和标题
+  const id =
+    matchFirst(response.url, /\/show\/(\d+)/i) ||
+    matchFirst(html, /\/show\/(\d+)/i) ||
+    matchFirst(html, /loadShow\((\d+),\s*\d+/i);
+  if (!id) {
+    logger.info("查找 Addic7ed 剧集完成: empty");
+    return null;
+  }
+
+  const title =
+    htmlDecode(stripTags(matchFirst(html, /<font[^>]*>\s*([^<]+?)\s+subtitles\s*<\/font>/i))).trim() ||
+    htmlDecode(matchFirst(html, /Download\s+(.+?)\s+subtitles/i)).trim() ||
+    stripEpisodeTokens(query).trim();
+  const seasons = [...html.matchAll(new RegExp(`loadShow\\(${escapeRegExp(id)},\\s*(\\d+)`, "gi"))]
+    .map((match) => Number(match[1]))
+    .filter((item) => Number.isFinite(item) && item > 0);
+
+  const show = {
+    id,
+    title,
+    pageUrl: new URL(`/show/${id}`, ADDIC7ED_BASE_URL).href,
+    seasons: seasons.length ? [...new Set(seasons)].sort((left, right) => left - right) : [1],
+  };
+
+  logger.info("查找 Addic7ed 剧集完成", show.title);
+  return show;
+}
+
+async function fetchAddic7edSeasonHtml(showId, season, referer) {
+  /*
+   * ================================================================================
+   * 步骤14：请求 Addic7ed 季页
+   * ================================================================================
+   * 目标：
+   * 1) 调用站点 Ajax 季页接口
+   * 2) 返回包含字幕行的 HTML 表格
+   */
+  logger.info("开始请求 Addic7ed 季页...", showId, season);
+
+  // 14.1 请求 Ajax 接口
+  const url = `${ADDIC7ED_BASE_URL}/ajax_loadShow.php?show=${encodeURIComponent(showId)}&season=${encodeURIComponent(season)}&langs=&hd=0&hi=0`;
+  const response = await fetchWithTimeout(url, {
+    headers: { ...browserHeaders, referer: referer || ADDIC7ED_BASE_URL, "x-requested-with": "XMLHttpRequest" },
+    timeoutMs: 42000,
+  });
+  const html = await response.text();
+
+  logger.info("请求 Addic7ed 季页完成", showId, season);
+  return html;
+}
+
+function parseAddic7edRows(html, show, season, requestedEpisode) {
+  /*
+   * ================================================================================
+   * 步骤15：解析 Addic7ed 字幕行
+   * ================================================================================
+   * 目标：
+   * 1) 从季页表格提取英文字幕
+   * 2) 转成统一搜索结果结构
+   */
+  logger.info("开始解析 Addic7ed 字幕行...");
+
+  // 15.1 遍历完成状态的表格行
+  const rows = [...String(html || "").matchAll(/<tr\b[^>]*class=["'][^"']*completed[^"']*["'][^>]*>([\s\S]*?)<\/tr>/gi)];
+  const results = [];
+  for (const row of rows) {
+    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((match) => match[1]);
+    if (cells.length < 10) continue;
+
+    // 15.2 提取字段并过滤语言、集数
+    const episodeNumber = Number(htmlDecode(stripTags(cells[1])).trim());
+    if (requestedEpisode?.episode && episodeNumber !== requestedEpisode.episode) continue;
+    const language = htmlDecode(stripTags(cells[3])).replace(/\s+/g, " ").trim();
+    if (language !== "English") continue;
+    const href = matchFirst(cells[9], /href=["']([^"']+)["']/i);
+    if (!href) continue;
+
+    const title = htmlDecode(stripTags(cells[2])).replace(/\s+/g, " ").trim();
+    const version = htmlDecode(stripTags(cells[4])).replace(/\s+/g, " ").trim();
+    const completed = htmlDecode(stripTags(cells[5])).replace(/\s+/g, " ").trim();
+    const displayTitle = `${show.title} S${String(season).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")} ${title}`.trim();
+
+    results.push({
+      source: "addic7ed",
+      sourceLabel: "Addic7ed",
+      title: displayTitle,
+      fileName: sanitizeFileName(`${displayTitle}.${language}.srt`),
+      ext: "srt",
+      language,
+      score: completed || "",
+      downloads: "",
+      size: "",
+      duration: "",
+      extra: version,
+      downloadUrl: new URL(htmlDecode(href), ADDIC7ED_BASE_URL).href,
+      detailUrl: show.pageUrl,
+    });
+  }
+
+  logger.info(`解析 Addic7ed 字幕行完成: ${results.length} 条`);
+  return results;
+}
+
+async function searchAvSubtitles(query, language, limit) {
+  /*
+   * ================================================================================
+   * 步骤16：查询 AVSubtitles 字幕源
+   * ================================================================================
+   * 目标：
+   * 1) 按番号或关键词搜索成人向字幕
+   * 2) 解析电影详情页中的语言字幕入口
+   */
+  logger.info("开始查询 AVSubtitles 字幕源...");
+
+  // 16.1 映射语言
+  const languageCode = getAvSubtitlesLanguageCode(language);
+  if (!languageCode) {
+    logger.info("查询 AVSubtitles 字幕源完成: 语言不支持");
+    return [];
+  }
+
+  // 16.2 请求搜索页
+  const searchUrl = `${AV_SUBTITLES_BASE_URL}/search_results.php?search=${encodeURIComponent(query)}&category=jav&language=${encodeURIComponent(languageCode)}`;
+  const response = await fetchWithTimeout(searchUrl, {
+    headers: { ...browserHeaders, referer: `${AV_SUBTITLES_BASE_URL}/search` },
+  });
+  const html = await response.text();
+  const movies = parseAvSubtitlesSearchResults(html, query, limit);
+
+  // 16.3 拉取详情页并解析字幕入口
+  const results = [];
+  for (const movie of movies.slice(0, 6)) {
+    const detailResponse = await fetchWithTimeout(movie.detailUrl, {
+      headers: { ...browserHeaders, referer: searchUrl },
+    });
+    const detailHtml = await detailResponse.text();
+    results.push(...parseAvSubtitlesDetail(detailHtml, movie, languageCode));
+    if (results.length >= limit) break;
+  }
+
+  logger.info(`查询 AVSubtitles 字幕源完成: ${results.length} 条`);
+  return results.slice(0, limit);
+}
+
+function getAvSubtitlesLanguageCode(language) {
+  // 16.4 映射 AVSubtitles 语言代码
+  return (
+    {
+      "zh-CN": "zh",
+      "zh-TW": "zh",
+      en: "en",
+      ja: "ja",
+    }[language] || ""
+  );
+}
+
+function parseAvSubtitlesSearchResults(html, query, limit) {
+  /*
+   * ================================================================================
+   * 步骤17：解析 AVSubtitles 搜索结果
+   * ================================================================================
+   * 目标：
+   * 1) 提取电影详情页链接
+   * 2) 用番号做相关性过滤
+   */
+  logger.info("开始解析 AVSubtitles 搜索结果...");
+
+  // 17.1 提取搜索结果链接
+  const code = extractCatalogCode(query);
+  const unique = new Map();
+  for (const match of String(html || "").matchAll(/<a\b[^>]*href=["']([^"']*\/movie\d+\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const href = htmlDecode(match[1]);
+    const title = htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim();
+    if (!title) continue;
+    if (code && !normalizeCatalogCode(title).includes(code)) continue;
+    const detailUrl = new URL(href, AV_SUBTITLES_BASE_URL).href;
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (unique.size >= limit) break;
+  }
+
+  logger.info(`解析 AVSubtitles 搜索结果完成: ${unique.size} 条`);
+  return [...unique.values()];
+}
+
+function parseAvSubtitlesDetail(html, movie, languageCode) {
+  /*
+   * ================================================================================
+   * 步骤18：解析 AVSubtitles 详情页
+   * ================================================================================
+   * 目标：
+   * 1) 读取指定语言字幕详情入口
+   * 2) 转成统一搜索结果结构
+   */
+  logger.info("开始解析 AVSubtitles 详情页...");
+
+  // 18.1 提取字幕入口
+  const results = [];
+  const pattern = new RegExp(`href=["']([^"']*/subtitles/${escapeRegExp(languageCode)}/\\d+)["'][^>]*>([\\s\\S]*?)<\\/a>`, "gi");
+  for (const match of String(html || "").matchAll(pattern)) {
+    const detailUrl = new URL(htmlDecode(match[1]), AV_SUBTITLES_BASE_URL).href;
+    const label = htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim();
+    const title = movie.title || htmlDecode(matchFirst(html, /<title[^>]*>Subtitles for\s+([\s\S]*?)<\/title>/i)).trim();
+    results.push({
+      source: "avsubtitles",
+      sourceLabel: "AVSubtitles",
+      title,
+      fileName: sanitizeFileName(`${title}.${languageCode}.srt`),
+      ext: "srt",
+      language: languageCode,
+      score: "",
+      downloads: "",
+      size: "",
+      duration: "",
+      extra: label || "Info / Download",
+      downloadUrl: "",
+      detailUrl,
+    });
+  }
+
+  logger.info(`解析 AVSubtitles 详情页完成: ${results.length} 条`);
+  return dedupeSearchResults(results);
+}
+
+async function searchAiyi(query, language, limit) {
+  /*
+   * ================================================================================
+   * 步骤19：查询爱译网字幕源
+   * ================================================================================
+   * 目标：
+   * 1) 按番号搜索中文简体字幕
+   * 2) 解析文章中的直链字幕文件
+   */
+  logger.info("开始查询爱译网字幕源...");
+
+  // 19.1 爱译网当前主要提供中文简体字幕
+  if (language !== "zh-CN" && language !== "zh-TW") {
+    logger.info("查询爱译网字幕源完成: 语言不支持");
+    return [];
+  }
+
+  // 19.2 搜索并严格过滤番号
+  const code = extractCatalogCode(query);
+  if (!code) {
+    logger.info("查询爱译网字幕源完成: 缺少番号");
+    return [];
+  }
+  const searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(code)}`;
+  const response = await fetchWithTimeout(searchUrl, {
+    headers: { ...browserHeaders, referer: AIYI_BASE_URL },
+  });
+  const html = await response.text();
+  const posts = parseAiyiSearchResults(html, code, limit);
+
+  // 19.3 解析文章详情
+  const results = [];
+  for (const post of posts.slice(0, 8)) {
+    const detailResponse = await fetchWithTimeout(post.detailUrl, {
+      headers: { ...browserHeaders, referer: searchUrl },
+    });
+    const detailHtml = await detailResponse.text();
+    const parsed = parseAiyiDetail(detailHtml, post, code);
+    if (parsed) results.push(parsed);
+    if (results.length >= limit) break;
+  }
+
+  logger.info(`查询爱译网字幕源完成: ${results.length} 条`);
+  return results;
+}
+
+function parseAiyiSearchResults(html, code, limit) {
+  /*
+   * ================================================================================
+   * 步骤20：解析爱译网搜索结果
+   * ================================================================================
+   * 目标：
+   * 1) 提取文章链接
+   * 2) 只保留标题或链接包含目标番号的结果
+   */
+  logger.info("开始解析爱译网搜索结果...");
+
+  // 20.1 提取并过滤文章链接
+  const unique = new Map();
+  for (const match of String(html || "").matchAll(/<a\b[^>]*href=["']([^"']*\/\d+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const detailUrl = new URL(htmlDecode(match[1]), AIYI_BASE_URL).href;
+    const title = htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim();
+    const comparable = normalizeCatalogCode(`${title} ${detailUrl}`);
+    if (!comparable.includes(code)) continue;
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (unique.size >= limit) break;
+  }
+
+  logger.info(`解析爱译网搜索结果完成: ${unique.size} 条`);
+  return [...unique.values()];
+}
+
+function parseAiyiDetail(html, post, code) {
+  /*
+   * ================================================================================
+   * 步骤21：解析爱译网文章详情
+   * ================================================================================
+   * 目标：
+   * 1) 从正文找到字幕文件直链
+   * 2) 读取格式、语种、匹配视频和文件名
+   */
+  logger.info("开始解析爱译网文章详情...");
+
+  // 21.1 查找直链字幕文件
+  const downloadHref = matchFirst(String(html || ""), /href=["']([^"']+\.(?:srt|ass|ssa|vtt|sub|zip)(?:\?[^"']*)?)["'][^>]*>\s*(?:下载字幕|Download|[^<]*)/i);
+  if (!downloadHref) {
+    logger.info("解析爱译网文章详情完成: 未找到直链");
+    return null;
+  }
+
+  // 21.2 提取展示字段
+  const title =
+    htmlDecode(stripTags(matchFirst(html, /<h1\b[^>]*class=["'][^"']*post-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i))).trim() ||
+    post.title ||
+    code;
+  const format = htmlDecode(matchFirst(html, /字幕格式[:：]\s*([^<]+)/i)).trim();
+  const subtitleLanguage = htmlDecode(matchFirst(html, /字幕语种[:：]\s*([^<]+)/i)).trim() || "中文简体";
+  const matchedVideo = htmlDecode(matchFirst(html, /匹配视频[:：]\s*([^<]+)/i)).trim();
+  const fileName = htmlDecode(matchFirst(html, /文件名[:：]\s*([^<]+)/i)).trim() || path.basename(new URL(downloadHref, post.detailUrl).pathname);
+
+  logger.info("解析爱译网文章详情完成", title);
+  return {
+    source: "aiyi",
+    sourceLabel: "爱译网",
+    title,
+    fileName: sanitizeFileName(fileName || `${code}.srt`),
+    ext: path.extname(fileName || downloadHref).replace(".", "") || "srt",
+    language: subtitleLanguage,
+    score: "",
+    downloads: "",
+    size: "",
+    duration: "",
+    extra: [format, matchedVideo].filter(Boolean).join(" · "),
+    downloadUrl: new URL(htmlDecode(downloadHref), post.detailUrl).href,
+    detailUrl: post.detailUrl,
+  };
+}
+
+function extractCatalogCode(value) {
+  // 21.3 提取番号样式代码
+  const match = String(value || "").match(/\b([A-Za-z]{2,8})[-_\s]?(\d{2,6})\b/);
+  return match ? `${match[1].toUpperCase()}${match[2]}` : "";
+}
+
+function normalizeCatalogCode(value) {
+  // 21.4 标准化番号比较文本
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
 async function fetchSubtitleBytes(result, language) {
   /*
    * ================================================================================
@@ -1225,13 +1824,20 @@ async function fetchSubtitleBytes(result, language) {
    */
   logger.info("开始拉取字幕字节...");
 
-  // 10.1 解析下载地址
+  // 10.1 处理需要会话的特殊源
+  if (result.source === "avsubtitles") {
+    const payload = await fetchAvSubtitlesPayload(result, language);
+    logger.info(`拉取字幕字节完成: ${payload.fileName}`);
+    return payload;
+  }
+
+  // 10.2 解析下载地址
   const downloadUrl = await resolveDownloadUrl(result, language);
   if (!downloadUrl) {
     throw new Error("没有找到可下载的字幕地址");
   }
 
-  // 10.2 请求字幕文件
+  // 10.3 请求字幕文件
   const response = await fetchWithTimeout(downloadUrl, {
     headers: { ...browserHeaders, referer: result.detailUrl || "https://subtitlecat.com/" },
   });
@@ -1240,7 +1846,7 @@ async function fetchSubtitleBytes(result, language) {
   const contentType = response.headers.get("content-type") || "text/plain; charset=utf-8";
   const fileName = sanitizeFileName(result.fileName || path.basename(new URL(downloadUrl).pathname) || "subtitle.srt");
 
-  // 10.3 自动解包 ZIP 字幕
+  // 10.4 自动解包 ZIP 字幕
   const extracted = extractSubtitlePayload(buffer, contentType, fileName, language);
   if (extracted) {
     logger.info(`拉取字幕字节完成: ${extracted.fileName}`);
@@ -1249,6 +1855,107 @@ async function fetchSubtitleBytes(result, language) {
 
   logger.info(`拉取字幕字节完成: ${buffer.length} bytes`);
   return { buffer, contentType, fileName };
+}
+
+async function fetchAvSubtitlesPayload(result, language) {
+  /*
+   * ================================================================================
+   * 步骤11：拉取 AVSubtitles 字幕
+   * ================================================================================
+   * 目标：
+   * 1) 用同一会话打开详情页、下载页和最终文件
+   * 2) 下载 ZIP 后自动挑选字幕文件
+   */
+  logger.info("开始拉取 AVSubtitles 字幕...");
+
+  // 11.1 建立会话并读取详情页
+  let cookieJar = "";
+  const fetchWithSession = async (url, referer) => {
+    const response = await fetchWithTimeout(url, {
+      headers: { ...browserHeaders, referer: referer || AV_SUBTITLES_BASE_URL, cookie: cookieJar },
+      allowErrorStatus: true,
+    });
+    cookieJar = mergeCookieJar(cookieJar, response);
+    return response;
+  };
+
+  const detailResponse = await fetchWithSession(result.detailUrl, AV_SUBTITLES_BASE_URL);
+  const detailHtml = await detailResponse.text();
+
+  // 11.2 解析下载页参数
+  const subId = matchFirst(detailHtml, /name=["']subid["']\s+value=["']([^"']+)["']/i);
+  const revId = matchFirst(detailHtml, /name=["']revid["']\s+value=["']([^"']+)["']/i);
+  const declaredFileName = htmlDecode(stripTags(matchFirst(detailHtml, /<span\b[^>]*class=["']text-mono["'][^>]*>([\s\S]*?)<\/span>/i))).trim();
+  if (!subId || !revId) {
+    throw new Error("AVSubtitles 没有找到下载参数");
+  }
+
+  // 11.3 打开下载页并解析最终链接
+  const downloadPageUrl = `${AV_SUBTITLES_BASE_URL}/download_page.php?subid=${encodeURIComponent(subId)}&revid=${encodeURIComponent(revId)}`;
+  const downloadPageResponse = await fetchWithSession(downloadPageUrl, result.detailUrl);
+  const downloadPageHtml = await downloadPageResponse.text();
+  const href = matchFirst(downloadPageHtml, /href=["']([^"']*download_sub\.php\?subid=[^"']+)["']/i);
+  if (!href) {
+    throw new Error("AVSubtitles 没有找到最终下载地址");
+  }
+
+  // 11.4 请求最终字幕文件
+  const downloadUrl = new URL(htmlDecode(href), downloadPageUrl).href;
+  const fileResponse = await fetchWithSession(downloadUrl, downloadPageUrl);
+  if (!fileResponse.ok) {
+    throw new Error(`AVSubtitles 下载失败: ${fileResponse.status}`);
+  }
+  const buffer = Buffer.from(await fileResponse.arrayBuffer());
+  const contentType = fileResponse.headers.get("content-type") || "application/octet-stream";
+  const dispositionName = parseContentDispositionFileName(fileResponse.headers.get("content-disposition") || "");
+  const fileName = sanitizeFileName(dispositionName || declaredFileName || result.fileName || "subtitle.zip");
+
+  // 11.5 解包并返回字幕
+  const extracted = extractSubtitlePayload(buffer, contentType, fileName, language);
+  logger.info("拉取 AVSubtitles 字幕完成", fileName);
+  return extracted || { buffer, contentType, fileName };
+}
+
+function mergeCookieJar(cookieJar, response) {
+  /*
+   * ================================================================================
+   * 步骤12：合并响应 Cookie
+   * ================================================================================
+   * 目标：
+   * 1) 保存字幕源下载会话
+   * 2) 后续请求复用同一 PHPSESSID
+   */
+  logger.info("开始合并响应 Cookie...");
+
+  // 12.1 读取 Set-Cookie
+  const setCookies = typeof response.headers.getSetCookie === "function"
+    ? response.headers.getSetCookie()
+    : [response.headers.get("set-cookie")].filter(Boolean);
+  const pairs = new Map(
+    String(cookieJar || "")
+      .split(";")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => [item.split("=")[0], item])
+  );
+
+  // 12.2 覆盖同名 Cookie
+  for (const item of setCookies) {
+    const pair = String(item || "").split(";")[0];
+    if (!pair) continue;
+    pairs.set(pair.split("=")[0], pair);
+  }
+
+  const merged = [...pairs.values()].join("; ");
+  logger.info("合并响应 Cookie 完成");
+  return merged;
+}
+
+function parseContentDispositionFileName(value) {
+  // 12.3 解析下载响应文件名
+  const encoded = matchFirst(value, /filename\*=UTF-8''([^;]+)/i);
+  if (encoded) return decodeURIComponent(encoded);
+  return htmlDecode(matchFirst(value, /filename=["']?([^"';]+)["']?/i));
 }
 
 async function resolveDownloadUrl(result, language) {
@@ -1571,9 +2278,9 @@ async function serveStatic(url, res) {
 
 async function fetchWithTimeout(url, options = {}) {
   // 6.3 带超时请求远程资源
-  const { allowErrorStatus = false, ...fetchOptions } = options;
+  const { allowErrorStatus = false, timeoutMs = REQUEST_TIMEOUT_MS, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
     if (!response.ok && !allowErrorStatus) {
@@ -1585,32 +2292,96 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
-function decodeSubtitle(buffer, contentType = "") {
-  // 4.4 尝试常见字幕编码
-  const charset = matchFirst(contentType, /charset=([^;]+)/i);
-  const encodings = [
-    charset,
-    "utf-8",
-    "gb18030",
-    "big5",
-    "shift_jis",
-    "windows-1252",
-    "iso-8859-1",
-  ].filter(Boolean);
+function decodeSubtitle(buffer, contentType = "", language = "zh-CN") {
+  /*
+   * ================================================================================
+   * 步骤13：解码字幕文本
+   * ================================================================================
+   * 目标：
+   * 1) 按字幕语言安排常见编码候选
+   * 2) 用替换符、乱码特征和目标语言字符给解码结果打分
+   */
+  logger.info("开始解码字幕文本...");
 
+  // 13.1 生成编码候选
+  const charset = matchFirst(contentType, /charset=([^;]+)/i);
+  const encodings = buildSubtitleEncodingCandidates(charset, language);
+
+  // 13.2 逐个解码并选择最低分结果
   let best = { text: "", encoding: "utf-8", score: Number.POSITIVE_INFINITY };
   for (const encoding of encodings) {
     try {
       const text = new TextDecoder(encoding, { fatal: false }).decode(buffer).replace(/\u0000/g, "");
-      const score = (text.match(/\uFFFD/g) || []).length;
+      const score = scoreDecodedSubtitleText(text, language);
       if (score < best.score) best = { text, encoding, score };
-      if (score === 0) break;
+      if (score <= -30) break;
     } catch {
       logger.warn("字幕编码不支持", encoding);
     }
   }
 
+  logger.info("解码字幕文本完成", best.encoding);
   return { text: best.text, encoding: best.encoding };
+}
+
+function buildSubtitleEncodingCandidates(charset, language) {
+  /*
+   * ================================================================================
+   * 步骤14：生成字幕编码候选
+   * ================================================================================
+   * 目标：
+   * 1) 优先尊重服务端声明的 charset
+   * 2) 中文、日文、英文使用不同候选顺序
+   */
+  logger.info("开始生成字幕编码候选...");
+
+  // 14.1 按语言排列候选
+  const candidatesByLanguage = {
+    "zh-CN": ["utf-8", "gb18030", "big5", "windows-1252", "iso-8859-1"],
+    "zh-TW": ["utf-8", "big5", "gb18030", "windows-1252", "iso-8859-1"],
+    ja: ["utf-8", "shift_jis", "euc-jp", "windows-1252", "iso-8859-1"],
+    en: ["utf-8", "windows-1252", "iso-8859-1", "gb18030"],
+  };
+  const ordered = [charset, ...(candidatesByLanguage[language] || candidatesByLanguage["zh-CN"])]
+    .filter(Boolean)
+    .map((item) => String(item).trim().toLowerCase());
+
+  // 14.2 去重后返回
+  const encodings = [...new Set(ordered)];
+  logger.info("生成字幕编码候选完成", encodings.join(", "));
+  return encodings;
+}
+
+function scoreDecodedSubtitleText(text, language) {
+  /*
+   * ================================================================================
+   * 步骤15：给解码文本评分
+   * ================================================================================
+   * 目标：
+   * 1) 惩罚替换符、控制字符和典型 mojibake 乱码
+   * 2) 奖励目标语言字符，减少中文乱码误判
+   */
+  logger.info("开始给解码文本评分...");
+
+  // 15.1 统计异常字符
+  const value = String(text || "");
+  const replacementCount = (value.match(/\uFFFD/g) || []).length;
+  const controlCount = (value.match(/[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g) || []).length;
+  const mojibakeCount = (value.match(/[ÃÂÐÑ]|(?:[äåæçèé][\u0080-\u00ff]?)/g) || []).length;
+
+  // 15.2 统计目标语言字符
+  let languageSignal = 0;
+  if (language === "zh-CN" || language === "zh-TW") {
+    languageSignal = Math.min(100, (value.match(/[\u3400-\u9fff]/g) || []).length);
+  } else if (language === "ja") {
+    languageSignal = Math.min(100, (value.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length);
+  } else if (language === "en") {
+    languageSignal = Math.min(60, (value.match(/[A-Za-z]/g) || []).length / 4);
+  }
+
+  const score = replacementCount * 1000 + controlCount * 40 + mojibakeCount * 30 - languageSignal;
+  logger.info("给解码文本评分完成", score);
+  return score;
 }
 
 function sendJson(res, statusCode, data) {

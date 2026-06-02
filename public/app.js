@@ -1,10 +1,12 @@
 const state = {
   results: [],
   selectedId: "",
+  selectedDownloadIds: new Set(),
   previewText: "",
   downloadUrl: "",
   downloadFileName: "",
   downloadDir: "",
+  videoFiles: [],
   searchController: null,
 };
 
@@ -21,12 +23,17 @@ const nodes = {
   language: document.querySelector("#languageSelect"),
   resultSummary: document.querySelector("#resultSummary"),
   statusBadge: document.querySelector("#statusBadge"),
+  sourceStats: document.querySelector("#sourceStats"),
   resultsBody: document.querySelector("#resultsBody"),
+  selectAllResults: document.querySelector("#selectAllResults"),
   previewMeta: document.querySelector("#previewMeta"),
   previewText: document.querySelector("#previewText"),
   copyButton: document.querySelector("#copyButton"),
   chooseDirButton: document.querySelector("#chooseDirButton"),
   downloadButton: document.querySelector("#downloadButton"),
+  batchDownloadButton: document.querySelector("#batchDownloadButton"),
+  scanVideoButton: document.querySelector("#scanVideoButton"),
+  videoList: document.querySelector("#videoList"),
   recentList: document.querySelector("#recentList"),
   clearRecentButton: document.querySelector("#clearRecentButton"),
 };
@@ -57,22 +64,38 @@ nodes.downloadButton.addEventListener("click", async () => {
   await downloadSubtitle();
 });
 
-// 1.4 绑定保存位置选择
+// 1.4 绑定批量下载按钮
+nodes.batchDownloadButton.addEventListener("click", async () => {
+  await downloadSelectedSubtitles();
+});
+
+// 1.5 绑定结果全选
+nodes.selectAllResults.addEventListener("change", () => {
+  toggleSelectAllResults();
+});
+
+// 1.6 绑定保存位置选择
 nodes.chooseDirButton.addEventListener("click", async () => {
   await chooseDownloadDir();
 });
 
-// 1.5 绑定最近搜索清理
+// 1.7 绑定视频文件夹扫描
+nodes.scanVideoButton.addEventListener("click", async () => {
+  await scanVideoFolder();
+});
+
+// 1.8 绑定最近搜索清理
 nodes.clearRecentButton.addEventListener("click", () => {
   localStorage.removeItem("subtitle-finder-recent");
   renderRecent();
 });
 
-// 1.6 恢复保存位置
+// 1.9 恢复保存位置
 restoreDownloadDir();
 
-// 1.7 渲染最近搜索
+// 1.10 渲染最近搜索
 renderRecent();
+renderBatchDownloadState();
 logger.info("页面初始化完成");
 
 async function searchSubtitles() {
@@ -101,12 +124,17 @@ async function searchSubtitles() {
   // 2.2 请求搜索接口
   setStatus("搜索中", "busy");
   nodes.resultSummary.textContent = `搜索 ${query}`;
-  nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">正在搜索...</td></tr>`;
+  state.results = [];
+  state.selectedDownloadIds.clear();
+  syncSelectAllResults();
+  renderBatchDownloadState();
+  renderSourceStats([{ sourceLabel: "全部源", status: "busy", statusLabel: "搜索中", count: "-", duration: "-" }]);
+  nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="6">正在搜索...</td></tr>`;
   clearPreview();
 
   try {
     const params = new URLSearchParams({ q: query, source, lang: language, limit: "80" });
-    const response = await fetchWithUiTimeout(`/api/search?${params.toString()}`, 15000);
+    const response = await fetchWithUiTimeout(`/api/search?${params.toString()}`, 48000);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "搜索失败");
 
@@ -114,13 +142,16 @@ async function searchSubtitles() {
     state.results = data.results || [];
     addRecent(query);
     renderResults(state.results);
+    renderSourceStats(data.sourceStats || []);
     const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
     setStatus(errorCount ? "部分完成" : "完成", errorCount ? "warn" : "ok");
     nodes.resultSummary.textContent = errorCount ? `${data.count} 条结果 · ${errorCount} 个源失败` : `${data.count} 条结果`;
     logger.info(`搜索字幕完成: ${data.count} 条`);
   } catch (error) {
     state.results = [];
+    state.selectedDownloadIds.clear();
     renderResults([]);
+    renderSourceStats([]);
     setStatus("失败", "error");
     nodes.resultSummary.textContent = String(error.message || error);
     logger.error("搜索字幕失败", error);
@@ -179,7 +210,9 @@ function renderResults(results) {
 
   // 3.1 处理空结果
   if (!results.length) {
-    nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">没有找到字幕。</td></tr>`;
+    nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="6">没有找到字幕。</td></tr>`;
+    syncSelectAllResults();
+    renderBatchDownloadState();
     logger.info("渲染搜索结果完成: empty");
     return;
   }
@@ -188,8 +221,12 @@ function renderResults(results) {
   nodes.resultsBody.innerHTML = results
     .map((item) => {
       const meta = [item.size, item.duration, item.extra].filter(Boolean).join(" · ");
+      const checked = state.selectedDownloadIds.has(item.id) ? "checked" : "";
       return `
         <tr data-id="${escapeHtml(item.id)}">
+          <td class="select-cell">
+            <input type="checkbox" data-select="${escapeHtml(item.id)}" title="选择下载" ${checked} />
+          </td>
           <td><span class="source-pill">${escapeHtml(item.sourceLabel)}</span></td>
           <td>
             <button class="file-button" type="button" data-preview="${escapeHtml(item.id)}">
@@ -210,7 +247,98 @@ function renderResults(results) {
     button.addEventListener("click", () => previewSubtitle(button.dataset.preview));
   });
 
+  // 3.4 绑定选择下载
+  nodes.resultsBody.querySelectorAll("[data-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        state.selectedDownloadIds.add(checkbox.dataset.select);
+      } else {
+        state.selectedDownloadIds.delete(checkbox.dataset.select);
+      }
+      syncSelectAllResults();
+      renderBatchDownloadState();
+    });
+  });
+
+  syncSelectAllResults();
+  renderBatchDownloadState();
   logger.info("渲染搜索结果完成");
+}
+
+function renderSourceStats(stats) {
+  /*
+   * ================================================================================
+   * 步骤4：渲染源级状态
+   * ================================================================================
+   * 目标：
+   * 1) 展示每个字幕源的完成、超时、失败状态
+   * 2) 展示结果数和耗时
+   */
+  logger.info("开始渲染源级状态...");
+
+  // 4.1 空状态隐藏
+  if (!Array.isArray(stats) || !stats.length) {
+    nodes.sourceStats.hidden = true;
+    nodes.sourceStats.innerHTML = "";
+    logger.info("渲染源级状态完成: empty");
+    return;
+  }
+
+  // 4.2 生成状态项
+  nodes.sourceStats.hidden = false;
+  nodes.sourceStats.innerHTML = stats
+    .map((item) => {
+      const message = item.message ? ` title="${escapeHtml(item.message)}"` : "";
+      return `
+        <div class="source-stat" data-status="${escapeHtml(item.status || "done")}"${message}>
+          <span>${escapeHtml(item.sourceLabel || item.source || "-")}</span>
+          <b>${escapeHtml(item.statusLabel || "-")}</b>
+          <small>${escapeHtml(String(item.count ?? 0))} 条 · ${escapeHtml(item.duration || "-")}</small>
+        </div>
+      `;
+    })
+    .join("");
+
+  logger.info("渲染源级状态完成");
+}
+
+function toggleSelectAllResults() {
+  /*
+   * ================================================================================
+   * 步骤5：切换结果全选
+   * ================================================================================
+   * 目标：
+   * 1) 勾选或取消全部当前搜索结果
+   * 2) 同步批量下载按钮
+   */
+  logger.info("开始切换结果全选...");
+
+  // 5.1 更新选择集合
+  if (nodes.selectAllResults.checked) {
+    state.results.forEach((item) => state.selectedDownloadIds.add(item.id));
+  } else {
+    state.selectedDownloadIds.clear();
+  }
+
+  // 5.2 重绘结果行
+  renderResults(state.results);
+  logger.info("切换结果全选完成");
+}
+
+function syncSelectAllResults() {
+  // 5.3 同步全选框状态
+  const total = state.results.length;
+  const selected = state.results.filter((item) => state.selectedDownloadIds.has(item.id)).length;
+  nodes.selectAllResults.disabled = total === 0;
+  nodes.selectAllResults.checked = total > 0 && selected === total;
+  nodes.selectAllResults.indeterminate = selected > 0 && selected < total;
+}
+
+function renderBatchDownloadState() {
+  // 5.4 更新批量下载按钮状态
+  const count = state.results.filter((item) => state.selectedDownloadIds.has(item.id)).length;
+  nodes.batchDownloadButton.textContent = count ? `下载 ${count} 个` : "批量下载";
+  nodes.batchDownloadButton.setAttribute("aria-disabled", count ? "false" : "true");
 }
 
 async function previewSubtitle(id) {
@@ -338,6 +466,76 @@ async function downloadSubtitle() {
   logger.info("下载字幕文件完成: browser");
 }
 
+async function downloadSelectedSubtitles() {
+  /*
+   * ================================================================================
+   * 步骤6：批量下载字幕文件
+   * ================================================================================
+   * 目标：
+   * 1) 按用户勾选的结果逐个下载
+   * 2) 桌面版直接保存到已选目录
+   */
+  logger.info("开始批量下载字幕文件...");
+
+  // 6.1 校验选择状态
+  const selectedItems = state.results.filter((item) => state.selectedDownloadIds.has(item.id));
+  if (!selectedItems.length || nodes.batchDownloadButton.getAttribute("aria-disabled") === "true") {
+    setStatus("未选择", "warn");
+    logger.info("批量下载字幕文件完成: empty");
+    return;
+  }
+
+  // 6.2 校验桌面保存位置
+  const isDesktop = Boolean(window.subtitleFinder?.saveSubtitle);
+  if (isDesktop && !state.downloadDir) {
+    setStatus("先选位置", "warn");
+    logger.info("批量下载字幕文件完成: 未选择保存位置");
+    return;
+  }
+
+  // 6.3 逐个下载
+  let savedCount = 0;
+  let failedCount = 0;
+  for (const [index, item] of selectedItems.entries()) {
+    try {
+      setStatus(`${index + 1}/${selectedItems.length}`, "busy");
+      const params = new URLSearchParams({ id: item.id, lang: nodes.language.value });
+      const absoluteUrl = new URL(`/api/download?${params.toString()}`, window.location.href).href;
+      if (isDesktop) {
+        const result = await window.subtitleFinder.saveSubtitle({
+          downloadUrl: absoluteUrl,
+          fileName: item.fileName || "subtitle.srt",
+          downloadDir: state.downloadDir,
+        });
+        if (result?.error || !result?.saved) throw new Error(result?.error || "保存取消");
+      } else {
+        triggerBrowserDownload(absoluteUrl, item.fileName || "subtitle.srt");
+      }
+      savedCount += 1;
+    } catch (error) {
+      failedCount += 1;
+      logger.error("批量下载单项失败", item.title, error);
+    }
+  }
+
+  // 6.4 更新完成状态
+  setStatus(failedCount ? "部分失败" : "已保存", failedCount ? "warn" : "ok");
+  nodes.resultSummary.textContent = failedCount
+    ? `已保存 ${savedCount} 个 · 失败 ${failedCount} 个`
+    : `已保存 ${savedCount} 个`;
+  logger.info("批量下载字幕文件完成", savedCount, failedCount);
+}
+
+function triggerBrowserDownload(url, fileName) {
+  // 6.5 浏览器版触发下载
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName || "subtitle.srt";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 async function chooseDownloadDir() {
   /*
    * ================================================================================
@@ -386,6 +584,79 @@ function renderDownloadDir() {
   }
   nodes.chooseDirButton.textContent = "位置";
   nodes.chooseDirButton.title = "选择存放位置";
+}
+
+async function scanVideoFolder() {
+  /*
+   * ================================================================================
+   * 步骤7：扫描视频文件夹
+   * ================================================================================
+   * 目标：
+   * 1) 桌面版选择视频目录
+   * 2) 显示可点击搜索的视频文件
+   */
+  logger.info("开始扫描视频文件夹...");
+
+  // 7.1 校验桌面能力
+  if (!window.subtitleFinder?.selectVideoDir) {
+    setStatus("桌面版可用", "warn");
+    logger.info("扫描视频文件夹完成: browser");
+    return;
+  }
+
+  // 7.2 选择目录并渲染视频文件
+  const result = await window.subtitleFinder.selectVideoDir();
+  if (!result?.selected) {
+    setStatus("已取消", "warn");
+    logger.info("扫描视频文件夹完成: cancel");
+    return;
+  }
+
+  state.videoFiles = Array.isArray(result.files) ? result.files : [];
+  renderVideoFiles();
+  setStatus(state.videoFiles.length ? "已扫描" : "无视频", state.videoFiles.length ? "ok" : "warn");
+  logger.info("扫描视频文件夹完成", state.videoFiles.length);
+}
+
+function renderVideoFiles() {
+  /*
+   * ================================================================================
+   * 步骤8：渲染视频文件列表
+   * ================================================================================
+   * 目标：
+   * 1) 展示扫描到的视频文件
+   * 2) 点击后用清洗后的文件名搜索字幕
+   */
+  logger.info("开始渲染视频文件列表...");
+
+  // 8.1 处理空列表
+  if (!state.videoFiles.length) {
+    nodes.videoList.innerHTML = `<span class="muted">未找到</span>`;
+    logger.info("渲染视频文件列表完成: empty");
+    return;
+  }
+
+  // 8.2 生成视频按钮
+  nodes.videoList.innerHTML = state.videoFiles
+    .slice(0, 80)
+    .map((item, index) => `
+      <button type="button" data-video-index="${index}" title="${escapeHtml(item.path || item.name || "")}">
+        <span>${escapeHtml(item.name || item.query || "video")}</span>
+        <small>${escapeHtml(item.query || item.name || "")}</small>
+      </button>
+    `)
+    .join("");
+
+  // 8.3 绑定点击搜索
+  nodes.videoList.querySelectorAll("[data-video-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = state.videoFiles[Number(button.dataset.videoIndex)];
+      nodes.query.value = item?.query || item?.name || "";
+      void searchSubtitles();
+    });
+  });
+
+  logger.info("渲染视频文件列表完成");
 }
 
 function addRecent(query) {
