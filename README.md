@@ -8,7 +8,7 @@
 
 在 Releases 页面下载最新发布文件。
 
-- Windows：优先下载 `SubtitleFinder Setup 1.1.3.exe` 安装包。也可以下载 `SubtitleFinder 1.1.3.exe` 便携包。
+- Windows：优先下载 `SubtitleFinder Setup 1.1.4.exe` 安装包。也可以下载 `SubtitleFinder 1.1.4.exe` 便携包。
 - Android：下载发布版 `.apk` 安装包，允许安装未知来源后打开。
 
 首次运行时，Windows 可能会提示未知发布者。本程序目前没有 Windows 代码签名证书，请只从本仓库 Releases 页面下载发布文件。
