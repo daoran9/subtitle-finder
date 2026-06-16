@@ -4,7 +4,14 @@ dist/
 .electron-cache/
 .electron-builder-cache/
 .privacy-scan-asar/
+.downloads/
+.subtitle-finder-data/
+.gradle-cache/
+android/keystore.properties
+android/keystores/
 CONTEXT.md
 *.log
 builder-debug.yml
 build/icon_variant_*.png
+public/nodejs/server.cjs
+public/nodejs/public/

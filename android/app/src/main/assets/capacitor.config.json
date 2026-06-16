@@ -1,0 +1,19 @@
+{
+	"appId": "com.subtitlefinder.app",
+	"appName": "SubtitleFinder",
+	"webDir": "public",
+	"bundledWebRuntime": false,
+	"server": {
+		"androidScheme": "http",
+		"hostname": "localhost",
+		"allowNavigation": [
+			"127.0.0.1",
+			"localhost"
+		]
+	},
+	"plugins": {
+		"NodeJS": {
+			"nodeDir": "nodejs"
+		}
+	}
+}

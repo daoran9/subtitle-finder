@@ -8,8 +8,13 @@
   "scripts": {
     "start": "node server.mjs",
     "app": "electron .",
-    "build:win": "electron-builder --win portable --x64 --publish never",
-    "check": "node --check server.mjs && node --check public/app.js && node --check electron/main.mjs && node --check electron/preload.cjs"
+    "build:win": "electron-builder --win portable nsis --x64 --publish never",
+    "build:win:portable": "electron-builder --win portable --x64 --publish never",
+    "build:win:installer": "electron-builder --win nsis --x64 --publish never",
+    "sync:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android",
+    "build:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && set GRADLE_USER_HOME=..\\.gradle-cache&& .\\gradlew.bat assembleDebug",
+    "build:android:release": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && .\\gradlew.bat assembleRelease",
+    "check": "node --check server.mjs && node --check public/app.js && node --check public/mobile.js && node --check public/nodejs/main.js && node --check scripts/sync-mobile-nodejs.mjs && node --check electron/main.mjs && node --check electron/preload.cjs"
   },
   "build": {
     "appId": "local.subtitle.finder",
@@ -36,12 +41,31 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SubtitleFinder"
     }
   },
   "devDependencies": {
+    "@capacitor/cli": "^3.9.0",
+    "@capacitor/android": "^3.9.0",
+    "@capacitor/core": "^3.9.0",
+    "@capacitor/filesystem": "^1.1.0",
+    "capacitor-nodejs": "^0.0.1",
     "electron": "^42.3.0",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.1"
   }
 }

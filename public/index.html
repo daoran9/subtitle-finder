@@ -8,6 +8,7 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%23256b4a'/%3E%3Ctext x='32' y='42' text-anchor='middle' font-size='34' font-family='Segoe UI,Arial' fill='white' font-weight='700'%3ES%3C/text%3E%3C/svg%3E"
     />
+    <script src="/capacitor-early-bridge.js"></script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -123,6 +124,7 @@
               <p id="previewMeta">未选择字幕</p>
             </div>
             <div class="preview-actions">
+              <button id="closePreviewButton" type="button" class="mobile-only" aria-label="关闭预览">×</button>
               <button id="copyButton" type="button" title="复制字幕内容">复制</button>
               <button id="chooseDirButton" type="button" title="选择存放位置">位置</button>
               <button id="downloadButton" type="button" class="download-link" aria-disabled="true" title="下载到已选位置">下载</button>
@@ -134,6 +136,8 @@
       </section>
     </main>
 
+    <script src="/capacitor.js"></script>
+    <script src="/mobile.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

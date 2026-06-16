@@ -1,14 +1,16 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { createServer } from "node:http";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { TextDecoder } from "node:util";
-import { inflateRawSync } from "node:zlib";
+import { createHash } from "crypto";
+import { createReadStream, promises as fsPromises } from "fs";
+import { createServer } from "http";
+import http from "http";
+import https from "https";
+import path from "path";
+import { fileURLToPath } from "url";
+import { TextDecoder } from "util";
+import { inflateRawSync } from "zlib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const { stat } = fsPromises;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = Number(process.env.PORT || 8765);
@@ -16,6 +18,7 @@ const REQUEST_TIMEOUT_MS = 16000;
 const SOURCE_SEARCH_TIMEOUT_MS = 6000;
 const OVERALL_SEARCH_TIMEOUT_MS = 12000;
 const RESULT_CACHE = new Map();
+const MAX_FETCH_REDIRECTS = 5;
 const YIFY_BASE_URL = "https://yifysubtitles.ch";
 const SUBF2M_BASE_URL = "https://subf2m.co";
 const MOVIE_SUBTITLES_BASE_URL = "https://www.moviesubtitles.org";
@@ -86,6 +89,7 @@ const TITLE_ALIAS_GROUPS = [
 ];
 const MAX_QUERY_VARIANTS = 12;
 const MAX_TV_SEASON_PAGES = 12;
+const runtimeFetch = globalThis.fetch || nodeFetchCompat;
 
 /*
  * ================================================================================
@@ -143,35 +147,42 @@ async function routeRequest(req, res) {
    */
   logger.info("开始分发请求...", req.method, url.pathname);
 
-  // 2.1 健康检查
+  // 2.1 处理跨源预检
+  if (req.method === "OPTIONS") {
+    sendEmpty(res, 204);
+    logger.info("请求分发完成: options");
+    return;
+  }
+
+  // 2.2 健康检查
   if (url.pathname === "/api/health") {
     sendJson(res, 200, { ok: true, port: runtimePort });
     logger.info("请求分发完成: health");
     return;
   }
 
-  // 2.2 搜索字幕
+  // 2.3 搜索字幕
   if (url.pathname === "/api/search") {
     await handleSearch(url, res);
     logger.info("请求分发完成: search");
     return;
   }
 
-  // 2.3 预览字幕
+  // 2.4 预览字幕
   if (url.pathname === "/api/preview") {
     await handlePreview(url, res);
     logger.info("请求分发完成: preview");
     return;
   }
 
-  // 2.4 下载字幕
+  // 2.5 下载字幕
   if (url.pathname === "/api/download") {
     await handleDownload(url, res);
     logger.info("请求分发完成: download");
     return;
   }
 
-  // 2.5 返回静态文件
+  // 2.6 返回静态文件
   await serveStatic(url, res);
   logger.info("请求分发完成: static");
 }
@@ -583,7 +594,7 @@ function extractLatinTitleCandidates(query) {
 
 function extractCjkTitleCandidates(query) {
   // 5.5 提取中文标题候选
-  return [...String(query || "").matchAll(/[\p{Script=Han}][\p{Script=Han}·・\s]{1,}/gu)]
+  return [...String(query || "").matchAll(/[\u3400-\u9fff][\u3400-\u9fff·・\s]{1,}/g)]
     .map((match) => match[0].replace(/\s+/g, "").trim())
     .filter((item) => item.length > 1);
 }
@@ -873,12 +884,12 @@ async function handleDownload(url, res) {
 
   // 5.2 返回文件字节
   const payload = await fetchSubtitleBytes(result, language);
-  res.writeHead(200, {
+  res.writeHead(200, withCorsHeaders({
     "content-type": payload.contentType || "application/octet-stream",
     "content-length": payload.buffer.length,
     "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(payload.fileName)}`,
     "cache-control": "no-store",
-  });
+  }));
   res.end(payload.buffer);
   logger.info(`下载字幕完成: ${payload.fileName}`);
 }
@@ -2297,11 +2308,11 @@ async function serveStatic(url, res) {
   try {
     const fileStat = await stat(filePath);
     if (!fileStat.isFile()) throw new Error("Not a file");
-    res.writeHead(200, {
+    res.writeHead(200, withCorsHeaders({
       "content-type": getMimeType(filePath),
       "content-length": fileStat.size,
       "cache-control": "no-cache",
-    });
+    }));
     createReadStream(filePath).pipe(res);
     logger.info("返回静态资源完成:", path.basename(filePath));
   } catch {
@@ -2311,19 +2322,149 @@ async function serveStatic(url, res) {
 }
 
 async function fetchWithTimeout(url, options = {}) {
-  // 6.3 带超时请求远程资源
+  /*
+   * ================================================================================
+   * 步骤11：请求远程资源
+   * ================================================================================
+   * 目标：
+   * 1) 在现代 Node 和 Android 内置 Node 12 下共用请求入口
+   * 2) 用超时控制慢源，避免搜索长期卡住
+   */
+  logger.info("开始请求远程资源...");
+
+  // 11.1 拆分业务参数和 fetch 参数
   const { allowErrorStatus = false, timeoutMs = REQUEST_TIMEOUT_MS, ...fetchOptions } = options;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const hasAbortController = typeof AbortController === "function";
+  const controller = hasAbortController ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+    // 11.2 执行带超时请求
+    const response = await runtimeFetch(url, {
+      ...fetchOptions,
+      signal: controller ? controller.signal : fetchOptions.signal,
+      timeoutMs,
+    });
     if (!response.ok && !allowErrorStatus) {
       throw new Error(`HTTP ${response.status}: ${url}`);
     }
+    logger.info("请求远程资源完成", response.status, url);
     return response;
   } finally {
-    clearTimeout(timer);
+    // 11.3 清理计时器
+    if (timer) clearTimeout(timer);
   }
+}
+
+function nodeFetchCompat(url, options = {}) {
+  /*
+   * ================================================================================
+   * 步骤12：兼容 Android 内置 Node 请求
+   * ================================================================================
+   * 目标：
+   * 1) 用 http/https 实现 fetch 子集
+   * 2) 支持文本、JSON、二进制、响应头和有限重定向
+   */
+  logger.info("开始执行 Node 兼容请求...");
+
+  // 12.1 读取请求参数
+  const timeoutMs = Number(options.timeoutMs || REQUEST_TIMEOUT_MS);
+  const redirects = Number(options.redirects || 0);
+  const requestUrl = new URL(url);
+  const transport = requestUrl.protocol === "https:" ? https : http;
+  const headers = normalizeRequestHeaders(options.headers || {});
+  const body = normalizeRequestBody(options.body);
+  if (body && !Object.keys(headers).some((key) => key.toLowerCase() === "content-length")) {
+    headers["content-length"] = Buffer.byteLength(body);
+  }
+
+  // 12.2 发起请求并聚合响应字节
+  return new Promise((resolve, reject) => {
+    const req = transport.request(
+      requestUrl,
+      {
+        method: options.method || (body ? "POST" : "GET"),
+        headers,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        res.on("end", () => {
+          const status = Number(res.statusCode || 0);
+          const location = res.headers.location;
+          if ([301, 302, 303, 307, 308].includes(status) && location && redirects < MAX_FETCH_REDIRECTS) {
+            const nextUrl = new URL(location, requestUrl).href;
+            logger.info("Node 兼容请求跳转", nextUrl);
+            resolve(nodeFetchCompat(nextUrl, { ...options, redirects: redirects + 1, method: status === 303 ? "GET" : options.method }));
+            return;
+          }
+
+          const buffer = Buffer.concat(chunks);
+          logger.info("Node 兼容请求完成", status, requestUrl.href);
+          resolve(createCompatResponse({
+            status,
+            url: requestUrl.href,
+            headers: res.headers,
+            buffer,
+          }));
+        });
+      }
+    );
+
+    // 12.3 处理超时和写入请求体
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`请求超时: ${requestUrl.href}`));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function createCompatResponse({ status, url, headers, buffer }) {
+  /*
+   * ================================================================================
+   * 步骤13：生成兼容响应对象
+   * ================================================================================
+   * 目标：
+   * 1) 对齐业务中使用的 fetch Response 字段
+   * 2) 让搜索、预览、下载都能复用同一返回结构
+   */
+  logger.info("开始生成兼容响应对象...");
+
+  // 13.1 包装响应头读取方法
+  const normalizedHeaders = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    normalizedHeaders[key.toLowerCase()] = value;
+  }
+
+  // 13.2 返回最小 Response 子集
+  const response = {
+    ok: status >= 200 && status < 300,
+    status,
+    url,
+    headers: {
+      get(name) {
+        const value = normalizedHeaders[String(name || "").toLowerCase()];
+        return Array.isArray(value) ? value.join(", ") : value || null;
+      },
+      getSetCookie() {
+        const value = normalizedHeaders["set-cookie"];
+        return Array.isArray(value) ? value : value ? [value] : [];
+      },
+    },
+    async text() {
+      return buffer.toString("utf8");
+    },
+    async json() {
+      return JSON.parse(buffer.toString("utf8"));
+    },
+    async arrayBuffer() {
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    },
+  };
+
+  logger.info("生成兼容响应对象完成", status);
+  return response;
 }
 
 function decodeSubtitle(buffer, contentType = "", language = "zh-CN") {
@@ -2350,7 +2491,7 @@ function decodeSubtitle(buffer, contentType = "", language = "zh-CN") {
       if (score < best.score) best = { text, encoding, score };
       if (score <= -30) break;
     } catch {
-      logger.warn("字幕编码不支持", encoding);
+      logger.info("字幕编码不支持", encoding);
     }
   }
 
@@ -2420,21 +2561,130 @@ function scoreDecodedSubtitleText(text, language) {
 
 function sendJson(res, statusCode, data) {
   const body = Buffer.from(JSON.stringify(data));
-  res.writeHead(statusCode, {
+  res.writeHead(statusCode, withCorsHeaders({
     "content-type": "application/json; charset=utf-8",
     "content-length": body.length,
     "cache-control": "no-store",
-  });
+  }));
   res.end(body);
 }
 
 function sendText(res, statusCode, text) {
   const body = Buffer.from(text);
-  res.writeHead(statusCode, {
+  res.writeHead(statusCode, withCorsHeaders({
     "content-type": "text/plain; charset=utf-8",
     "content-length": body.length,
-  });
+  }));
   res.end(body);
+}
+
+function sendEmpty(res, statusCode) {
+  /*
+   * ================================================================================
+   * 步骤16：返回空响应
+   * ================================================================================
+   * 目标：
+   * 1) 处理 Android WebView 跨源预检
+   * 2) 保持 API 返回头一致
+   */
+  logger.info("开始返回空响应...");
+
+  // 16.1 写入跨源响应头
+  res.writeHead(statusCode, withCorsHeaders({
+    "content-length": 0,
+    "cache-control": "no-store",
+  }));
+  res.end();
+
+  logger.info("返回空响应完成", statusCode);
+}
+
+function withCorsHeaders(headers = {}) {
+  /*
+   * ================================================================================
+   * 步骤17：合并跨源响应头
+   * ================================================================================
+   * 目标：
+   * 1) 允许 Capacitor 本地页面访问本机 HTTP 服务
+   * 2) 允许下载接口暴露文件名响应头
+   */
+  logger.info("开始合并跨源响应头...");
+
+  // 17.1 合并通用 CORS 头
+  const merged = {
+    ...headers,
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type,authorization",
+    "access-control-expose-headers": "content-disposition,content-length,content-type",
+  };
+
+  logger.info("合并跨源响应头完成");
+  return merged;
+}
+
+function normalizeRequestHeaders(headers) {
+  /*
+   * ================================================================================
+   * 步骤18：整理请求头
+   * ================================================================================
+   * 目标：
+   * 1) 支持普通对象、Headers 和数组形式
+   * 2) 输出 http/https.request 可接收的对象
+   */
+  logger.info("开始整理请求头...");
+
+  // 18.1 处理 Headers 实例和数组
+  const output = {};
+  if (headers && typeof headers.forEach === "function") {
+    headers.forEach((value, key) => {
+      output[key] = value;
+    });
+  } else if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      output[key] = value;
+    }
+  } else {
+    Object.assign(output, headers || {});
+  }
+
+  logger.info("整理请求头完成");
+  return output;
+}
+
+function normalizeRequestBody(body) {
+  /*
+   * ================================================================================
+   * 步骤19：整理请求体
+   * ================================================================================
+   * 目标：
+   * 1) 支持字符串、Buffer、URLSearchParams 和 ArrayBuffer
+   * 2) 输出可写入 Node 请求的 Buffer 或字符串
+   */
+  logger.info("开始整理请求体...");
+
+  // 19.1 空请求体直接返回
+  if (body === undefined || body === null) {
+    logger.info("整理请求体完成: empty");
+    return null;
+  }
+
+  // 19.2 转换常见请求体类型
+  if (Buffer.isBuffer(body) || typeof body === "string") {
+    logger.info("整理请求体完成: direct");
+    return body;
+  }
+  if (body instanceof URLSearchParams) {
+    logger.info("整理请求体完成: search params");
+    return body.toString();
+  }
+  if (body instanceof ArrayBuffer) {
+    logger.info("整理请求体完成: array buffer");
+    return Buffer.from(body);
+  }
+
+  logger.info("整理请求体完成: string fallback");
+  return String(body);
 }
 
 function matchFirst(value, pattern) {

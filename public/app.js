@@ -6,9 +6,12 @@ const state = {
   downloadUrl: "",
   downloadFileName: "",
   downloadDir: "",
+  downloadDirLabel: "",
   videoFiles: [],
   searchController: null,
+  previewController: null,
 };
+const PREVIEW_TIMEOUT_MS = 20000;
 
 const logger = {
   info: (...args) => console.info("[SubtitleFinderUI]", ...args),
@@ -28,6 +31,7 @@ const nodes = {
   selectAllResults: document.querySelector("#selectAllResults"),
   previewMeta: document.querySelector("#previewMeta"),
   previewText: document.querySelector("#previewText"),
+  closePreviewButton: document.querySelector("#closePreviewButton"),
   copyButton: document.querySelector("#copyButton"),
   chooseDirButton: document.querySelector("#chooseDirButton"),
   downloadButton: document.querySelector("#downloadButton"),
@@ -57,6 +61,10 @@ nodes.form.addEventListener("submit", (event) => {
 // 1.2 绑定复制按钮
 nodes.copyButton.addEventListener("click", async () => {
   await copyPreviewText();
+});
+
+nodes.closePreviewButton.addEventListener("click", () => {
+  closeMobilePreview();
 });
 
 // 1.3 绑定字幕下载按钮
@@ -134,7 +142,7 @@ async function searchSubtitles() {
 
   try {
     const params = new URLSearchParams({ q: query, source, lang: language, limit: "80" });
-    const response = await fetchWithUiTimeout(`/api/search?${params.toString()}`, 48000);
+    const response = await fetchWithUiTimeout(apiUrl(`/api/search?${params.toString()}`), 48000);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "搜索失败");
 
@@ -227,16 +235,22 @@ function renderResults(results) {
           <td class="select-cell">
             <input type="checkbox" data-select="${escapeHtml(item.id)}" title="选择下载" ${checked} />
           </td>
-          <td><span class="source-pill">${escapeHtml(item.sourceLabel)}</span></td>
-          <td>
-            <button class="file-button" type="button" data-preview="${escapeHtml(item.id)}">
-              ${escapeHtml(item.title)}
+          <td class="source-cell"><span class="source-pill">${escapeHtml(item.sourceLabel)}</span></td>
+          <td class="file-cell" data-preview-cell="${escapeHtml(item.id)}">
+            <button class="file-button" type="button" data-preview="${escapeHtml(item.id)}" title="查看字幕内容">
+              <span class="file-title">${escapeHtml(item.title)}</span>
+              <span class="preview-hint">查看</span>
             </button>
             <div class="file-meta">${escapeHtml(meta || item.fileName)}</div>
+            <div class="mobile-result-metrics" aria-hidden="true">
+              <span>${escapeHtml(item.language || "-")}</span>
+              <span>评分 ${escapeHtml(String(item.score ?? "-"))}</span>
+              <span>下载 ${escapeHtml(String(item.downloads || "-"))}</span>
+            </div>
           </td>
-          <td>${escapeHtml(item.language || "-")}</td>
-          <td>${escapeHtml(String(item.score ?? "-"))}</td>
-          <td>${escapeHtml(String(item.downloads || "-"))}</td>
+          <td class="language-cell">${escapeHtml(item.language || "-")}</td>
+          <td class="score-cell">${escapeHtml(String(item.score ?? "-"))}</td>
+          <td class="downloads-cell">${escapeHtml(String(item.downloads || "-"))}</td>
         </tr>
       `;
     })
@@ -244,10 +258,21 @@ function renderResults(results) {
 
   // 3.3 绑定点击预览
   nodes.resultsBody.querySelectorAll("[data-preview]").forEach((button) => {
-    button.addEventListener("click", () => previewSubtitle(button.dataset.preview));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      previewSubtitle(button.dataset.preview);
+    });
   });
 
-  // 3.4 绑定选择下载
+  // 3.4 绑定文件区域预览
+  nodes.resultsBody.querySelectorAll("[data-preview-cell]").forEach((cell) => {
+    cell.addEventListener("click", (event) => {
+      if (event.target.closest("[data-select]")) return;
+      void previewSubtitle(cell.dataset.previewCell);
+    });
+  });
+
+  // 3.5 绑定选择下载
   nodes.resultsBody.querySelectorAll("[data-select]").forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) {
@@ -353,30 +378,50 @@ async function previewSubtitle(id) {
    */
   logger.info("开始预览字幕...");
 
-  // 4.1 更新选择状态
+  // 4.1 取消上一次预览请求
+  if (state.previewController) {
+    state.previewController.abort();
+  }
+  const controller = new AbortController();
+  state.previewController = controller;
+  const timer = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+
+  // 4.2 更新选择状态
   state.selectedId = id;
   setActiveRow(id);
   setStatus("读取中", "busy");
   nodes.previewText.textContent = "正在读取字幕内容...";
   nodes.previewMeta.textContent = "读取中";
+  openMobilePreview();
 
   try {
-    // 4.2 请求预览内容
+    // 4.3 请求预览内容
     const params = new URLSearchParams({ id, lang: nodes.language.value });
-    const response = await fetch(`/api/preview?${params.toString()}`);
+    const response = await fetch(apiUrl(`/api/preview?${params.toString()}`), { signal: controller.signal });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "预览失败");
 
-    // 4.3 更新预览面板
+    // 4.4 更新预览面板
+    if (state.previewController !== controller) return;
     state.previewText = data.text || "";
     nodes.previewText.textContent = state.previewText || "字幕内容为空。";
     nodes.previewMeta.textContent = `${data.source} · ${data.fileName} · ${formatBytes(data.size)} · ${data.encoding}`;
-    state.downloadUrl = `/api/download?${params.toString()}`;
+    state.downloadUrl = absoluteApiUrl(`/api/download?${params.toString()}`);
     state.downloadFileName = data.fileName || "subtitle.srt";
     nodes.downloadButton.setAttribute("aria-disabled", "false");
     setStatus("已读取", "ok");
     logger.info("预览字幕完成");
   } catch (error) {
+    if (error.name === "AbortError") {
+      if (state.previewController === controller) {
+        nodes.previewText.textContent = "预览超时，已停止等待。";
+        nodes.previewMeta.textContent = "读取超时";
+        nodes.downloadButton.setAttribute("aria-disabled", "true");
+        setStatus("超时", "warn");
+      }
+      logger.info("预览字幕完成: aborted");
+      return;
+    }
     state.previewText = "";
     state.downloadUrl = "";
     state.downloadFileName = "";
@@ -385,6 +430,11 @@ async function previewSubtitle(id) {
     nodes.downloadButton.setAttribute("aria-disabled", "true");
     setStatus("失败", "error");
     logger.error("预览字幕失败", error);
+  } finally {
+    clearTimeout(timer);
+    if (state.previewController === controller) {
+      state.previewController = null;
+    }
   }
 }
 
@@ -430,7 +480,7 @@ async function downloadSubtitle() {
   }
 
   // 5.2 桌面版调用 Electron 保存对话框
-  const absoluteUrl = new URL(state.downloadUrl, window.location.href).href;
+  const absoluteUrl = absoluteApiUrl(state.downloadUrl);
   if (window.subtitleFinder?.saveSubtitle) {
     if (!state.downloadDir) {
       setStatus("先选位置", "warn");
@@ -450,6 +500,7 @@ async function downloadSubtitle() {
       logger.info("下载字幕文件完成: desktop");
     } catch (error) {
       setStatus("失败", "error");
+      nodes.resultSummary.textContent = String(error.message || error);
       logger.error("下载字幕文件失败", error);
     }
     return;
@@ -500,7 +551,7 @@ async function downloadSelectedSubtitles() {
     try {
       setStatus(`${index + 1}/${selectedItems.length}`, "busy");
       const params = new URLSearchParams({ id: item.id, lang: nodes.language.value });
-      const absoluteUrl = new URL(`/api/download?${params.toString()}`, window.location.href).href;
+      const absoluteUrl = absoluteApiUrl(`/api/download?${params.toString()}`);
       if (isDesktop) {
         const result = await window.subtitleFinder.saveSubtitle({
           downloadUrl: absoluteUrl,
@@ -514,6 +565,7 @@ async function downloadSelectedSubtitles() {
       savedCount += 1;
     } catch (error) {
       failedCount += 1;
+      nodes.resultSummary.textContent = String(error.message || error);
       logger.error("批量下载单项失败", item.title, error);
     }
   }
@@ -534,6 +586,47 @@ function triggerBrowserDownload(url, fileName) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function apiUrl(path) {
+  /*
+   * ================================================================================
+   * 步骤6：生成 API 地址
+   * ================================================================================
+   * 目标：
+   * 1) Android 页面保留在 Capacitor 原生域，API 请求转到内置 Node 服务
+   * 2) Windows 和浏览器继续使用相对路径
+   */
+  logger.info("开始生成 API 地址...");
+
+  // 6.1 读取移动端内置服务地址
+  const baseUrl = String(window.subtitleFinderApiBase || "").replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(path)) {
+    logger.info("生成 API 地址完成: absolute");
+    return path;
+  }
+  const target = baseUrl ? `${baseUrl}${path.startsWith("/") ? path : `/${path}`}` : path;
+
+  logger.info("生成 API 地址完成", target);
+  return target;
+}
+
+function absoluteApiUrl(path) {
+  /*
+   * ================================================================================
+   * 步骤6：生成完整 API 地址
+   * ================================================================================
+   * 目标：
+   * 1) 给 Electron 主进程提供可校验的完整下载地址
+   * 2) 兼容 Android 内置服务和普通浏览器页面
+   */
+  logger.info("开始生成完整 API 地址...");
+
+  // 6.1 基于 API 地址生成绝对 URL
+  const target = new URL(apiUrl(path), window.location.href).href;
+
+  logger.info("生成完整 API 地址完成", target);
+  return target;
 }
 
 async function chooseDownloadDir() {
@@ -562,7 +655,9 @@ async function chooseDownloadDir() {
     return;
   }
   state.downloadDir = result.directory;
+  state.downloadDirLabel = result.label || result.directory;
   localStorage.setItem("subtitle-finder-download-dir", state.downloadDir);
+  localStorage.setItem("subtitle-finder-download-dir-label", state.downloadDirLabel);
   renderDownloadDir();
 
   setStatus("已选位置", "ok");
@@ -572,6 +667,7 @@ async function chooseDownloadDir() {
 function restoreDownloadDir() {
   // 6.3 恢复上次选择的下载目录
   state.downloadDir = localStorage.getItem("subtitle-finder-download-dir") || "";
+  state.downloadDirLabel = localStorage.getItem("subtitle-finder-download-dir-label") || state.downloadDir;
   renderDownloadDir();
 }
 
@@ -579,7 +675,7 @@ function renderDownloadDir() {
   // 6.4 更新下载目录按钮状态
   if (state.downloadDir) {
     nodes.chooseDirButton.textContent = "位置已选";
-    nodes.chooseDirButton.title = state.downloadDir;
+    nodes.chooseDirButton.title = state.downloadDirLabel || state.downloadDir;
     return;
   }
   nodes.chooseDirButton.textContent = "位置";
@@ -718,9 +814,63 @@ function clearPreview() {
   state.previewText = "";
   state.downloadUrl = "";
   state.downloadFileName = "";
+  closeMobilePreview();
+  if (state.previewController) {
+    state.previewController.abort();
+    state.previewController = null;
+  }
   nodes.previewMeta.textContent = "未选择字幕";
   nodes.previewText.textContent = "点击左侧结果查看字幕内容。";
   nodes.downloadButton.setAttribute("aria-disabled", "true");
+}
+
+function scrollPreviewIntoView(behavior = "smooth") {
+  /*
+   * ================================================================================
+   * 步骤7：定位预览区域
+   * ================================================================================
+   * 目标：
+   * 1) 桌面端保留三栏布局，不打断用户视线
+   * 2) 窄屏点击文件后自动进入预览区
+   */
+  logger.info("开始定位预览区域...");
+
+  logger.info("定位预览区域完成");
+}
+
+function openMobilePreview() {
+  /*
+   * ================================================================================
+   * 步骤8：打开移动端预览层
+   * ================================================================================
+   * 目标：
+   * 1) 在手机上把预览直接铺到当前视口
+   * 2) 不改变结果区位置，不要求手动滚动
+   */
+  logger.info("开始打开移动端预览层...");
+
+  if (!window.matchMedia("(max-width: 760px)").matches) {
+    logger.info("打开移动端预览层完成: desktop");
+    return;
+  }
+
+  document.body.classList.add("preview-open");
+  logger.info("打开移动端预览层完成");
+}
+
+function closeMobilePreview() {
+  /*
+   * ================================================================================
+   * 步骤9：关闭移动端预览层
+   * ================================================================================
+   * 目标：
+   * 1) 释放当前预览占位
+   * 2) 让用户回到结果列表继续点选
+   */
+  logger.info("开始关闭移动端预览层...");
+
+  document.body.classList.remove("preview-open");
+  logger.info("关闭移动端预览层完成");
 }
 
 function setStatus(text, tone) {
