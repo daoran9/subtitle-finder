@@ -28,6 +28,10 @@ body {
   letter-spacing: 0;
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button,
 input,
 select {
@@ -130,6 +134,48 @@ h2 {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
+}
+
+.input-shell {
+  position: relative;
+}
+
+.input-shell input {
+  padding-right: 40px;
+}
+
+.ghost-icon-button {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  min-width: 28px;
+  width: 28px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  transform: translateY(-50%);
+}
+
+.ghost-icon-button:hover {
+  background: var(--panel-strong);
+  color: var(--ink);
+}
+
+.ghost-icon-button[aria-disabled="true"] {
+  pointer-events: none;
+  opacity: 0;
+}
+
+.about-header .ghost-icon-button {
+  position: static;
+  flex: 0 0 28px;
+  transform: none;
+  pointer-events: auto;
+  z-index: 1;
+  touch-action: manipulation;
 }
 
 input,
@@ -298,6 +344,28 @@ button:hover,
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.icon-button {
+  min-width: 34px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--muted);
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  background: var(--panel-strong);
+  color: var(--ink);
+}
+
+.icon-button:focus-visible {
+  outline: 2px solid rgba(37, 107, 74, 0.22);
+  outline-offset: 2px;
 }
 
 #batchDownloadButton[aria-disabled="true"] {
@@ -562,6 +630,81 @@ tbody tr.is-active {
   word-break: break-word;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(17, 22, 18, 0.52);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.about-dialog {
+  width: min(560px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 42px rgba(18, 27, 21, 0.24);
+  overflow: hidden;
+}
+
+.about-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.about-header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.about-body {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.about-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 16px 16px;
+}
+
+.about-footer button {
+  min-height: 32px;
+  border-color: var(--line);
+  background: white;
+  color: var(--ink);
+  touch-action: manipulation;
+}
+
+.about-body a {
+  color: var(--accent-dark);
+  text-decoration: none;
+  word-break: break-word;
+}
+
+.about-body a:hover {
+  text-decoration: underline;
+}
+
+.about-body p {
+  margin: 0;
+}
+
 @media (max-width: 1180px) {
   .workspace {
     grid-template-columns: 300px 1fr;
@@ -640,6 +783,10 @@ tbody tr.is-active {
     grid-template-columns: 1fr 72px;
   }
 
+  .ghost-icon-button {
+    right: 5px;
+  }
+
   .field-grid {
     gap: 8px;
   }
@@ -660,6 +807,19 @@ tbody tr.is-active {
   .results-actions,
   .preview-actions {
     gap: 6px;
+  }
+
+  .icon-button {
+    min-width: 32px;
+    min-height: 32px;
+  }
+
+  .modal-backdrop {
+    padding: 10px;
+  }
+
+  .about-dialog {
+    width: 100%;
   }
 
   .preview-actions button {

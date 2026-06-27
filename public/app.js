@@ -3,6 +3,7 @@ const state = {
   selectedId: "",
   selectedDownloadIds: new Set(),
   previewText: "",
+  aboutFocusReturn: null,
   downloadUrl: "",
   downloadFileName: "",
   downloadDir: "",
@@ -22,8 +23,10 @@ const logger = {
 const nodes = {
   form: document.querySelector("#searchForm"),
   query: document.querySelector("#queryInput"),
+  clearQueryButton: document.querySelector("#clearQueryButton"),
   source: document.querySelector("#sourceSelect"),
   language: document.querySelector("#languageSelect"),
+  aboutButton: document.querySelector("#aboutButton"),
   resultSummary: document.querySelector("#resultSummary"),
   statusBadge: document.querySelector("#statusBadge"),
   sourceStats: document.querySelector("#sourceStats"),
@@ -36,6 +39,9 @@ const nodes = {
   chooseDirButton: document.querySelector("#chooseDirButton"),
   downloadButton: document.querySelector("#downloadButton"),
   batchDownloadButton: document.querySelector("#batchDownloadButton"),
+  aboutModal: document.querySelector("#aboutModal"),
+  closeAboutButton: document.querySelector("#closeAboutButton"),
+  closeAboutFooterButton: document.querySelector("#closeAboutFooterButton"),
   scanVideoButton: document.querySelector("#scanVideoButton"),
   videoList: document.querySelector("#videoList"),
   recentList: document.querySelector("#recentList"),
@@ -63,45 +69,95 @@ nodes.copyButton.addEventListener("click", async () => {
   await copyPreviewText();
 });
 
+// 1.3 绑定搜索框清空
+nodes.clearQueryButton.addEventListener("click", () => {
+  clearSearchQuery();
+});
+
+nodes.query.addEventListener("input", () => {
+  renderClearQueryButton();
+});
+
+// 1.4 绑定关于弹窗
+nodes.aboutButton.addEventListener("click", () => {
+  openAboutDialog();
+});
+
+nodes.closeAboutButton.addEventListener("click", () => {
+  closeAboutDialog();
+});
+
+nodes.closeAboutButton.addEventListener("pointerdown", (event) => {
+  event.stopPropagation();
+});
+
+nodes.closeAboutFooterButton.addEventListener("click", () => {
+  closeAboutDialog();
+});
+
+nodes.aboutModal.addEventListener("pointerup", (event) => {
+  const closeButton = event.target instanceof Element ? event.target.closest("[data-about-close]") : null;
+  if (closeButton) {
+    closeAboutDialog();
+  }
+});
+
+nodes.aboutModal.addEventListener("click", (event) => {
+  if (event.target instanceof Element && event.target.closest("[data-about-close]")) {
+    closeAboutDialog();
+    return;
+  }
+  if (event.target === nodes.aboutModal) {
+    closeAboutDialog();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !nodes.aboutModal.hidden) {
+    closeAboutDialog();
+  }
+});
+
 nodes.closePreviewButton.addEventListener("click", () => {
   closeMobilePreview();
 });
 
-// 1.3 绑定字幕下载按钮
+// 1.5 绑定字幕下载按钮
 nodes.downloadButton.addEventListener("click", async () => {
   await downloadSubtitle();
 });
 
-// 1.4 绑定批量下载按钮
+// 1.6 绑定批量下载按钮
 nodes.batchDownloadButton.addEventListener("click", async () => {
   await downloadSelectedSubtitles();
 });
 
-// 1.5 绑定结果全选
+// 1.7 绑定结果全选
 nodes.selectAllResults.addEventListener("change", () => {
   toggleSelectAllResults();
 });
 
-// 1.6 绑定保存位置选择
+// 1.8 绑定保存位置选择
 nodes.chooseDirButton.addEventListener("click", async () => {
   await chooseDownloadDir();
 });
 
-// 1.7 绑定视频文件夹扫描
+// 1.9 绑定视频文件夹扫描
 nodes.scanVideoButton.addEventListener("click", async () => {
   await scanVideoFolder();
 });
 
-// 1.8 绑定最近搜索清理
+// 1.10 绑定最近搜索清理
 nodes.clearRecentButton.addEventListener("click", () => {
   localStorage.removeItem("subtitle-finder-recent");
   renderRecent();
 });
 
-// 1.9 恢复保存位置
+// 1.11 恢复保存位置
 restoreDownloadDir();
 
-// 1.10 渲染最近搜索
+// 1.12 渲染最近搜索
+renderClearQueryButton();
 renderRecent();
 renderBatchDownloadState();
 logger.info("页面初始化完成");
@@ -144,7 +200,7 @@ async function searchSubtitles() {
     const params = new URLSearchParams({ q: query, source, lang: language, limit: "80" });
     const response = await fetchWithUiTimeout(apiUrl(`/api/search?${params.toString()}`), 48000);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "搜索失败");
+    if (!response.ok) throw new Error(data.detail || data.error || "搜索失败");
 
     // 2.3 渲染搜索结果
     state.results = data.results || [];
@@ -244,12 +300,12 @@ function renderResults(results) {
             <div class="file-meta">${escapeHtml(meta || item.fileName)}</div>
             <div class="mobile-result-metrics" aria-hidden="true">
               <span>${escapeHtml(item.language || "-")}</span>
-              <span>评分 ${escapeHtml(String(item.score ?? "-"))}</span>
+              <span>评分 ${escapeHtml(String(item.score == null ? "-" : item.score))}</span>
               <span>下载 ${escapeHtml(String(item.downloads || "-"))}</span>
             </div>
           </td>
           <td class="language-cell">${escapeHtml(item.language || "-")}</td>
-          <td class="score-cell">${escapeHtml(String(item.score ?? "-"))}</td>
+          <td class="score-cell">${escapeHtml(String(item.score == null ? "-" : item.score))}</td>
           <td class="downloads-cell">${escapeHtml(String(item.downloads || "-"))}</td>
         </tr>
       `;
@@ -314,11 +370,20 @@ function renderSourceStats(stats) {
   nodes.sourceStats.innerHTML = stats
     .map((item) => {
       const message = item.message ? ` title="${escapeHtml(item.message)}"` : "";
+      const countValue = Number(item.count);
+      const matchedValue = Number(item.matchedCount);
+      const hasCountValue = Number.isFinite(countValue);
+      const hasMatchedValue = Number.isFinite(matchedValue);
+      const countText = !hasCountValue
+        ? `${escapeHtml(String(item.count == null ? "-" : item.count))}`
+        : hasMatchedValue && matchedValue !== countValue
+          ? `${escapeHtml(String(countValue))} 条原始 · ${escapeHtml(String(matchedValue))} 条命中`
+          : `${escapeHtml(String(countValue))} 条`;
       return `
         <div class="source-stat" data-status="${escapeHtml(item.status || "done")}"${message}>
           <span>${escapeHtml(item.sourceLabel || item.source || "-")}</span>
           <b>${escapeHtml(item.statusLabel || "-")}</b>
-          <small>${escapeHtml(String(item.count ?? 0))} 条 · ${escapeHtml(item.duration || "-")}</small>
+          <small>${countText} · ${escapeHtml(item.duration || "-")}</small>
         </div>
       `;
     })
@@ -366,6 +431,78 @@ function renderBatchDownloadState() {
   nodes.batchDownloadButton.setAttribute("aria-disabled", count ? "false" : "true");
 }
 
+function clearSearchQuery() {
+  /*
+   * ================================================================================
+   * 步骤5：清空搜索字段
+   * ================================================================================
+   * 目标：
+   * 1) 一键清空当前搜索词
+   * 2) 清空后保持焦点，方便直接重输
+   */
+  logger.info("开始清空搜索字段...");
+
+  // 5.1 清空输入并恢复焦点
+  nodes.query.value = "";
+  nodes.query.focus();
+  renderClearQueryButton();
+
+  logger.info("清空搜索字段完成");
+}
+
+function renderClearQueryButton() {
+  // 5.2 同步清空按钮状态
+  const hasValue = Boolean(nodes.query.value);
+  nodes.clearQueryButton.setAttribute("aria-disabled", hasValue ? "false" : "true");
+}
+
+function openAboutDialog() {
+  /*
+   * ================================================================================
+   * 步骤6：打开关于弹窗
+   * ================================================================================
+   * 目标：
+   * 1) 展示项目、源码和授权信息
+   * 2) 让桌面端和移动端都能查看发布说明
+   */
+  logger.info("开始打开关于弹窗...");
+
+  // 6.1 记录触发元素并展示弹窗
+  state.aboutFocusReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  nodes.aboutModal.hidden = false;
+  nodes.aboutModal.removeAttribute("aria-hidden");
+  document.body.classList.add("modal-open");
+  nodes.aboutModal.focus();
+  nodes.closeAboutButton.focus();
+
+  logger.info("打开关于弹窗完成");
+}
+
+function closeAboutDialog() {
+  /*
+   * ================================================================================
+   * 步骤7：关闭关于弹窗
+   * ================================================================================
+   * 目标：
+   * 1) 退出说明弹层
+   * 2) 回到原来的操作位置
+   */
+  logger.info("开始关闭关于弹窗...");
+
+  // 7.1 隐藏弹窗并恢复焦点
+  nodes.aboutModal.hidden = true;
+  nodes.aboutModal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  if (state.aboutFocusReturn && typeof state.aboutFocusReturn.focus === "function") {
+    state.aboutFocusReturn.focus();
+  } else {
+    nodes.aboutButton.focus();
+  }
+  state.aboutFocusReturn = null;
+
+  logger.info("关闭关于弹窗完成");
+}
+
 async function previewSubtitle(id) {
   /*
    * ================================================================================
@@ -399,7 +536,7 @@ async function previewSubtitle(id) {
     const params = new URLSearchParams({ id, lang: nodes.language.value });
     const response = await fetch(apiUrl(`/api/preview?${params.toString()}`), { signal: controller.signal });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "预览失败");
+    if (!response.ok) throw new Error(data.detail || data.error || "预览失败");
 
     // 4.4 更新预览面板
     if (state.previewController !== controller) return;
@@ -481,7 +618,7 @@ async function downloadSubtitle() {
 
   // 5.2 桌面版调用 Electron 保存对话框
   const absoluteUrl = absoluteApiUrl(state.downloadUrl);
-  if (window.subtitleFinder?.saveSubtitle) {
+  if (window.subtitleFinder && window.subtitleFinder.saveSubtitle) {
     if (!state.downloadDir) {
       setStatus("先选位置", "warn");
       logger.info("下载字幕文件完成: 未选择保存位置");
@@ -495,8 +632,8 @@ async function downloadSubtitle() {
         fileName: state.downloadFileName || "subtitle.srt",
         downloadDir: state.downloadDir,
       });
-      if (result?.error) throw new Error(result.error);
-      setStatus(result?.saved ? "已保存" : "已取消", result?.saved ? "ok" : "warn");
+      if (result && result.error) throw new Error(result.error);
+      setStatus(result && result.saved ? "已保存" : "已取消", result && result.saved ? "ok" : "warn");
       logger.info("下载字幕文件完成: desktop");
     } catch (error) {
       setStatus("失败", "error");
@@ -537,7 +674,7 @@ async function downloadSelectedSubtitles() {
   }
 
   // 6.2 校验桌面保存位置
-  const isDesktop = Boolean(window.subtitleFinder?.saveSubtitle);
+  const isDesktop = Boolean(window.subtitleFinder && window.subtitleFinder.saveSubtitle);
   if (isDesktop && !state.downloadDir) {
     setStatus("先选位置", "warn");
     logger.info("批量下载字幕文件完成: 未选择保存位置");
@@ -558,7 +695,7 @@ async function downloadSelectedSubtitles() {
           fileName: item.fileName || "subtitle.srt",
           downloadDir: state.downloadDir,
         });
-        if (result?.error || !result?.saved) throw new Error(result?.error || "保存取消");
+        if ((result && result.error) || !(result && result.saved)) throw new Error((result && result.error) || "保存取消");
       } else {
         triggerBrowserDownload(absoluteUrl, item.fileName || "subtitle.srt");
       }
@@ -641,7 +778,7 @@ async function chooseDownloadDir() {
   logger.info("开始选择下载目录...");
 
   // 6.1 校验桌面能力
-  if (!window.subtitleFinder?.selectDownloadDir) {
+  if (!(window.subtitleFinder && window.subtitleFinder.selectDownloadDir)) {
     setStatus("浏览器下载", "warn");
     logger.info("选择下载目录完成: browser");
     return;
@@ -649,7 +786,7 @@ async function chooseDownloadDir() {
 
   // 6.2 选择并保存目录
   const result = await window.subtitleFinder.selectDownloadDir();
-  if (!result?.selected || !result.directory) {
+  if (!(result && result.selected) || !result.directory) {
     setStatus("已取消", "warn");
     logger.info("选择下载目录完成: cancel");
     return;
@@ -694,7 +831,7 @@ async function scanVideoFolder() {
   logger.info("开始扫描视频文件夹...");
 
   // 7.1 校验桌面能力
-  if (!window.subtitleFinder?.selectVideoDir) {
+  if (!(window.subtitleFinder && window.subtitleFinder.selectVideoDir)) {
     setStatus("桌面版可用", "warn");
     logger.info("扫描视频文件夹完成: browser");
     return;
@@ -702,7 +839,7 @@ async function scanVideoFolder() {
 
   // 7.2 选择目录并渲染视频文件
   const result = await window.subtitleFinder.selectVideoDir();
-  if (!result?.selected) {
+  if (!(result && result.selected)) {
     setStatus("已取消", "warn");
     logger.info("扫描视频文件夹完成: cancel");
     return;
@@ -747,7 +884,8 @@ function renderVideoFiles() {
   nodes.videoList.querySelectorAll("[data-video-index]").forEach((button) => {
     button.addEventListener("click", () => {
       const item = state.videoFiles[Number(button.dataset.videoIndex)];
-      nodes.query.value = item?.query || item?.name || "";
+      nodes.query.value = (item && item.query) || (item && item.name) || "";
+      renderClearQueryButton();
       void searchSubtitles();
     });
   });
@@ -794,6 +932,7 @@ function renderRecent() {
   nodes.recentList.querySelectorAll("[data-query]").forEach((button) => {
     button.addEventListener("click", () => {
       nodes.query.value = button.dataset.query || "";
+      renderClearQueryButton();
       void searchSubtitles();
     });
   });

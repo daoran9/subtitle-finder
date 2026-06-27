@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { access, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -129,10 +129,14 @@ function bringMainWindowToFront() {
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
+  mainWindow.show();
+  mainWindow.setAlwaysOnTop(true);
   if (!mainWindow.isVisible()) {
     mainWindow.show();
   }
   mainWindow.focus();
+  mainWindow.moveTop();
+  mainWindow.setAlwaysOnTop(false);
 
   logger.info("显示主窗口完成");
 }
@@ -236,7 +240,13 @@ ipcMain.handle("subtitle:save", async (event, payload = {}) => {
     const response = await fetch(urlCheck.url);
     if (!response.ok) {
       logger.info("保存字幕文件完成: 下载失败", response.status);
-      return { saved: false, error: `下载失败: ${response.status}` };
+      let message = `下载失败: ${response.status}`;
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const body = await response.json().catch(() => null);
+        message = String(body?.detail || body?.error || message);
+      }
+      return { saved: false, error: message };
     }
     const dispositionFileName = parseContentDispositionFileName(response.headers.get("content-disposition") || "");
     const finalFileName = sanitizeWindowsFileName(dispositionFileName || fallbackFileName);
@@ -686,6 +696,10 @@ function resolveRuntimeDataDir() {
    * 2) 开发环境写到项目目录，避免默认落到 C 盘用户目录
    */
 
+  // 17.0 优先使用显式指定的数据目录
+  const overrideDir = String(process.env.SUBTITLE_FINDER_DATA_DIR || "").trim();
+  if (overrideDir && isWritableDirectoryCandidate(overrideDir)) return overrideDir;
+
   // 17.1 计算首选目录
   const appRoot = app.isPackaged ? path.dirname(app.getPath("exe")) : path.join(__dirname, "..");
   const preferredDir = path.join(appRoot, app.isPackaged ? "SubtitleFinderData" : ".subtitle-finder-data");
@@ -710,6 +724,7 @@ function isWritableDirectoryCandidate(directory) {
     mkdirSync(directory, { recursive: true });
     const probePath = path.join(directory, ".write-test");
     writeFileSync(probePath, String(Date.now()));
+    rmSync(probePath, { force: true });
     return true;
   } catch {
     return false;
@@ -754,16 +769,39 @@ function installConsoleFileLogger() {
   // 20.2 包装日志方法
   console.info = (...args) => {
     appendLogLine("INFO", args);
-    originalConsole.info(...args);
+    safeOriginalConsoleWrite(originalConsole.info, args);
   };
   console.warn = (...args) => {
     appendLogLine("WARN", args);
-    originalConsole.warn(...args);
+    safeOriginalConsoleWrite(originalConsole.warn, args);
   };
   console.error = (...args) => {
     appendLogLine("ERROR", args);
-    originalConsole.error(...args);
+    safeOriginalConsoleWrite(originalConsole.error, args);
   };
+}
+
+function safeOriginalConsoleWrite(writer, args) {
+  /*
+   * ================================================================================
+   * 步骤20.3：安全写回原始控制台
+   * ================================================================================
+   * 目标：
+   * 1) 保留开发期标准输出
+   * 2) 标准输出管道断开时不影响主进程
+   */
+
+  // 20.3.1 兜住已断开的 stdout/stderr
+  try {
+    writer(...args);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error || "");
+    const code = String(error && error.code ? error.code : "");
+    if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || /broken pipe/i.test(message)) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function appendLogLine(level, args) {
@@ -824,7 +862,8 @@ function clampNumber(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.round(numberValue)));
 }
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const shouldUseSingleInstanceLock = process.env.SUBTITLE_FINDER_DISABLE_SINGLE_INSTANCE !== "1";
+const gotSingleInstanceLock = shouldUseSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 if (!gotSingleInstanceLock) {
   logger.info("已有实例运行，退出当前进程");
   app.quit();

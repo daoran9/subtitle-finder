@@ -1,11 +1,19 @@
 (function () {
   const win = window;
   const capacitor = win.Capacitor;
-  const isAndroid = Boolean(capacitor?.isNativePlatform?.() && capacitor?.getPlatform?.() === "android");
+  const isAndroid = Boolean(
+    capacitor &&
+    typeof capacitor.isNativePlatform === "function" &&
+    capacitor.isNativePlatform() &&
+    typeof capacitor.getPlatform === "function" &&
+    capacitor.getPlatform() === "android"
+  );
   if (!isAndroid) return;
 
-  const nodePlugin = capacitor.Plugins?.NodeJS || win.CapacitorCustomPlatform?.plugins?.NodeJS;
-  if (!nodePlugin?.addListener) return;
+  const nodePlugin =
+    (capacitor && capacitor.Plugins && capacitor.Plugins.NodeJS) ||
+    (win.CapacitorCustomPlatform && win.CapacitorCustomPlatform.plugins && win.CapacitorCustomPlatform.plugins.NodeJS);
+  if (!nodePlugin || typeof nodePlugin.addListener !== "function") return;
 
   const logger = {
     info: (...args) => console.info("[SubtitleFinderMobile]", ...args),
@@ -29,12 +37,12 @@
 
       // 1.2 调用 Android 原生目录授权
       const nativePlugin = getNativePlugin();
-      if (!nativePlugin?.selectDownloadDir) {
+      if (!nativePlugin || !nativePlugin.selectDownloadDir) {
         logger.info("选择移动端保存目录完成: native missing");
         return { selected: false, error: "当前 Android 包缺少文件夹授权能力" };
       }
       const result = await nativePlugin.selectDownloadDir();
-      logger.info("选择移动端保存目录完成", result?.label || result?.directory || "cancel");
+      logger.info("选择移动端保存目录完成", (result && result.label) || (result && result.directory) || "cancel");
       return result;
     },
     async selectVideoDir() {
@@ -42,12 +50,12 @@
 
       // 1.3 调用 Android 原生视频目录扫描
       const nativePlugin = getNativePlugin();
-      if (!nativePlugin?.selectVideoDir) {
+      if (!nativePlugin || !nativePlugin.selectVideoDir) {
         logger.info("选择移动端视频目录完成: native missing");
         return { selected: false, error: "当前 Android 包缺少视频目录扫描能力" };
       }
       const result = await nativePlugin.selectVideoDir();
-      logger.info("选择移动端视频目录完成", Array.isArray(result?.files) ? result.files.length : 0);
+      logger.info("选择移动端视频目录完成", result && Array.isArray(result.files) ? result.files.length : 0);
       return result;
     },
     async saveSubtitle(payload = {}) {
@@ -55,7 +63,7 @@
 
       // 1.4 校验 Android 原生保存能力
       const nativePlugin = getNativePlugin();
-      if (!nativePlugin?.saveSubtitle) {
+      if (!nativePlugin || !nativePlugin.saveSubtitle) {
         logger.info("保存移动端字幕完成: native missing");
         return { saved: false, error: "当前 Android 包缺少文件夹保存能力" };
       }
@@ -77,7 +85,13 @@
       const response = await fetch(downloadUrl);
       if (!response.ok) {
         logger.info("保存移动端字幕完成: download failed", response.status);
-        return { saved: false, error: `下载失败: ${response.status}` };
+        let message = `下载失败: ${response.status}`;
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const body = await response.json().catch(() => null);
+          message = String((body && body.detail) || (body && body.error) || message);
+        }
+        return { saved: false, error: message };
       }
 
       const responseFileName = parseDownloadFileName(response.headers.get("content-disposition") || "");
@@ -90,7 +104,7 @@
         mimeType: response.headers.get("content-type") || "application/octet-stream",
       });
 
-      logger.info("保存移动端字幕完成", result?.fileName || result?.filePath || "unknown");
+      logger.info("保存移动端字幕完成", (result && result.fileName) || (result && result.filePath) || "unknown");
       return result;
     },
   };
@@ -118,7 +132,7 @@
 
   // 2.2 监听服务启动完成
   nodePlugin.addListener("subtitle-finder:ready", (event) => {
-    const url = event?.args?.[0]?.url || "http://127.0.0.1:8765/";
+    const url = event && event.args && event.args[0] && event.args[0].url || "http://127.0.0.1:8765/";
     logger.info("移动端 Node 服务启动完成", url);
     setMobileApiBase(url);
   });
@@ -128,7 +142,7 @@
 
   // 2.4 监听服务启动失败
   nodePlugin.addListener("subtitle-finder:error", (event) => {
-    const message = event?.args?.[0]?.message || "移动端服务启动失败";
+    const message = event && event.args && event.args[0] && event.args[0].message || "移动端服务启动失败";
     logger.error("移动端 Node 服务启动失败", message);
     const status = document.querySelector("#statusBadge");
     const summary = document.querySelector("#resultSummary");
@@ -204,8 +218,9 @@
     logger.info("开始获取 Android 原生插件...");
 
     // 5.1 从两个可能位置读取原生插件
-    const plugin = win.Capacitor?.Plugins?.SubtitleFinderNative
-      || win.CapacitorCustomPlatform?.plugins?.SubtitleFinderNative;
+    const plugin =
+      (win.Capacitor && win.Capacitor.Plugins && win.Capacitor.Plugins.SubtitleFinderNative) ||
+      (win.CapacitorCustomPlatform && win.CapacitorCustomPlatform.plugins && win.CapacitorCustomPlatform.plugins.SubtitleFinderNative);
 
     logger.info("获取 Android 原生插件完成", plugin ? "ok" : "missing");
     return plugin;
@@ -244,7 +259,8 @@
     logger.info("开始解析下载文件名...");
 
     // 7.1 解析 UTF-8 编码文件名
-    const encoded = String(value || "").match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const encodedMatch = String(value || "").match(/filename\*=UTF-8''([^;]+)/i);
+    const encoded = encodedMatch ? encodedMatch[1] : "";
     if (encoded) {
       const decoded = decodeHeaderFileName(encoded);
       logger.info("解析下载文件名完成", decoded);
@@ -252,7 +268,8 @@
     }
 
     // 7.2 解析普通文件名
-    const plain = String(value || "").match(/filename=["']?([^"';]+)["']?/i)?.[1] || "";
+    const plainMatch = String(value || "").match(/filename=["']?([^"';]+)["']?/i);
+    const plain = plainMatch ? plainMatch[1] : "";
     const decoded = decodeHeaderFileName(plain);
     logger.info("解析下载文件名完成", decoded || "empty");
     return decoded;

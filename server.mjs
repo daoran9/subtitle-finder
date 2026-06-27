@@ -17,6 +17,7 @@ const DEFAULT_PORT = Number(process.env.PORT || 8765);
 const REQUEST_TIMEOUT_MS = 16000;
 const SOURCE_SEARCH_TIMEOUT_MS = 6000;
 const OVERALL_SEARCH_TIMEOUT_MS = 12000;
+const ADDIC7ED_TIMEOUT_MS = 9000;
 const RESULT_CACHE = new Map();
 const MAX_FETCH_REDIRECTS = 5;
 const YIFY_BASE_URL = "https://yifysubtitles.ch";
@@ -87,6 +88,7 @@ const TITLE_ALIAS_GROUPS = [
   ["The Last of Us", "最后生还者", "最後生還者"],
   ["The Bear", "熊家餐馆", "大熊餐厅"],
 ];
+const TITLE_ALIAS_FAMILY_LOOKUP = buildTitleAliasFamilyLookup();
 const MAX_QUERY_VARIANTS = 12;
 const MAX_TV_SEASON_PAGES = 12;
 const runtimeFetch = globalThis.fetch || nodeFetchCompat;
@@ -225,7 +227,7 @@ async function handleSearch(url, res) {
   const filteredBuckets = settled.map((item) =>
     item.status === "fulfilled" ? filterResultsByEpisode(item.value.results.filter(Boolean), requestedEpisode) : []
   );
-  const sourceStats = buildSourceStats(selectedSources, settled, filteredBuckets);
+  const sourceStats = buildSourceStats(selectedSources, settled, filteredBuckets, queryVariants);
   const errors = sourceStats
     .filter((item) => item.status !== "done")
     .map((item) => `${item.sourceLabel}: ${item.message}`);
@@ -284,22 +286,19 @@ function buildSelectedSearchSources({ source, queryVariants, language }) {
     {
       key: "addic7ed",
       name: "Addic7ed",
-      includeInAll: false,
-      timeoutMs: 42000,
+      timeoutMs: ADDIC7ED_TIMEOUT_MS,
       search: (sourceLimit) =>
         searchWithQueryVariants(filterLatinQueryVariants(queryVariants), sourceLimit, (variant) => searchAddic7ed(variant, language, sourceLimit)),
     },
     {
       key: "avsubtitles",
       name: "AVSubtitles",
-      includeInAll: false,
       timeoutMs: 16000,
       search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAvSubtitles(variant, language, sourceLimit)),
     },
     {
       key: "aiyi",
       name: "爱译网",
-      includeInAll: false,
       timeoutMs: 12000,
       search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAiyi(variant, language, sourceLimit)),
     },
@@ -307,42 +306,10 @@ function buildSelectedSearchSources({ source, queryVariants, language }) {
 
   // 4.2 按选择过滤字幕源
   const selected = source === "all"
-    ? availableSources.filter((item) => shouldIncludeSourceInAll(item, queryVariants, language))
+    ? availableSources
     : availableSources.filter((item) => item.key === source);
   logger.info(`组装搜索源完成: ${selected.map((item) => item.name).join(", ") || "empty"}`);
   return selected;
-}
-
-function shouldIncludeSourceInAll(sourceItem, queryVariants, language) {
-  /*
-   * ================================================================================
-   * 步骤5：判断全部搜索是否包含字幕源
-   * ================================================================================
-   * 目标：
-   * 1) 常规源始终参与全部搜索
-   * 2) 专项源只在关键词明显匹配时参与，避免拖慢普通搜索
-   */
-  logger.info("开始判断全部搜索字幕源...", sourceItem.name);
-
-  // 5.1 常规源直接加入
-  if (sourceItem.includeInAll !== false) {
-    logger.info("判断全部搜索字幕源完成: 常规源");
-    return true;
-  }
-
-  // 5.2 明确编号搜索加入编号类字幕源
-  const queryText = queryVariants.join(" ");
-  const hasCatalogCode = Boolean(extractCatalogCode(queryText));
-  if ((sourceItem.key === "aiyi" || sourceItem.key === "avsubtitles") && hasCatalogCode) {
-    const supportedLanguage = sourceItem.key === "aiyi"
-      ? language === "zh-CN" || language === "zh-TW"
-      : Boolean(getAvSubtitlesLanguageCode(language));
-    logger.info("判断全部搜索字幕源完成: 编号源", supportedLanguage);
-    return supportedLanguage;
-  }
-
-  logger.info("判断全部搜索字幕源完成: 跳过");
-  return false;
 }
 
 function filterLatinQueryVariants(queryVariants) {
@@ -462,29 +429,35 @@ async function searchSourceWithTimeout(sourceName, searchTask, timeoutMs = SOURC
   }
 }
 
-function buildSourceStats(selectedSources, settled, filteredBuckets) {
+function buildSourceStats(selectedSources, settled, filteredBuckets, queryVariants) {
   /*
    * ================================================================================
    * 步骤7：生成源级状态
    * ================================================================================
    * 目标：
    * 1) 把每个字幕源的完成、超时、失败状态返回前端
-   * 2) 展示过滤后的结果数和耗时
+   * 2) 同时展示原始数和最终命中数，避免结果卡片误导
    */
   logger.info("开始生成源级状态...");
+
+  // 7.1 生成标题匹配关键词
+  const needles = buildTitleNeedles(Array.isArray(queryVariants) ? queryVariants : []);
 
   // 7.1 逐源生成状态项
   const stats = selectedSources.map((sourceItem, index) => {
     const item = settled[index];
     if (item?.status === "fulfilled") {
       const durationMs = Number(item.value?.durationMs || 0);
-      const count = Array.isArray(filteredBuckets[index]) ? filteredBuckets[index].length : 0;
+      const bucket = Array.isArray(filteredBuckets[index]) ? filteredBuckets[index] : [];
+      const count = bucket.length;
+      const matchedCount = bucket.filter((result) => searchResultMatchesTitle(result, needles)).length;
       return {
         source: sourceItem.key,
         sourceLabel: sourceItem.name,
         status: "done",
         statusLabel: "完成",
         count,
+        matchedCount,
         durationMs,
         duration: formatSourceStatDuration(durationMs),
         message: "",
@@ -500,6 +473,7 @@ function buildSourceStats(selectedSources, settled, filteredBuckets) {
       status,
       statusLabel: status === "timeout" ? "超时" : "失败",
       count: 0,
+      matchedCount: 0,
       durationMs,
       duration: formatSourceStatDuration(durationMs),
       message,
@@ -647,10 +621,9 @@ function mergeSearchResultBuckets(buckets, limit, options = {}) {
     }
   }
 
-  // 6.2 按片名、季集、来源稳定排序
-  const merged = candidates
-    .sort((left, right) => compareSearchResults(left, right, needles, options.requestedEpisode))
-    .slice(0, limit);
+  // 6.2 先按片名归组，再在组内按季集、来源稳定排序
+  const grouped = buildGroupedSearchResults(candidates, needles, options.requestedEpisode);
+  const merged = grouped.flatMap((group) => group.items).slice(0, limit);
 
   logger.info(`合并多源结果完成: ${merged.length} 条`);
   return merged;
@@ -672,7 +645,7 @@ function buildTitleNeedles(queryVariants) {
     if (!value) continue;
     const normalized = normalizeComparableText(value);
     if (normalized && !needles.some((item) => item.normalized === normalized)) {
-      needles.push({ raw: value, normalized });
+      needles.push({ raw: value, normalized, family: TITLE_ALIAS_FAMILY_LOOKUP.get(normalized) || normalized });
     }
   }
   return needles;
@@ -699,10 +672,6 @@ function compareSearchResults(left, right, needles, requestedEpisode) {
   const rightScore = scoreSearchResult(right, needles, requestedEpisode);
   if (leftScore !== rightScore) return rightScore - leftScore;
 
-  const leftGroup = getSearchResultGroupKey(left, needles);
-  const rightGroup = getSearchResultGroupKey(right, needles);
-  if (leftGroup !== rightGroup) return leftGroup.localeCompare(rightGroup);
-
   const leftEpisode = getSearchResultEpisodeKey(left);
   const rightEpisode = getSearchResultEpisodeKey(right);
   if (leftEpisode !== rightEpisode) return leftEpisode - rightEpisode;
@@ -714,8 +683,66 @@ function compareSearchResults(left, right, needles, requestedEpisode) {
   return String(left.title || "").localeCompare(String(right.title || ""));
 }
 
+function buildGroupedSearchResults(results, needles, requestedEpisode) {
+  /*
+   * ================================================================================
+   * 步骤6.8：按片名归组搜索结果
+   * ================================================================================
+   * 目标：
+   * 1) 让同一系列结果连续展示
+   * 2) 组内继续按相关度、季集和来源稳定排序
+   */
+  logger.info("开始按片名归组搜索结果...");
+
+  // 6.8.1 先构建带排序信息的分组条目
+  const groups = new Map();
+  for (const result of results) {
+    const groupKey = getSearchResultGroupKey(result, needles);
+    const entry = {
+      result,
+      groupKey,
+      score: scoreSearchResult(result, needles, requestedEpisode),
+      episodeKey: getSearchResultEpisodeKey(result),
+      sourceOrder: getSourceOrder(result.source),
+      title: String(result.title || ""),
+    };
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(entry);
+  }
+
+  // 6.8.2 排序分组和组内条目
+  const orderedGroups = [...groups.entries()]
+    .map(([groupKey, entries]) => {
+      const items = entries
+        .sort((left, right) => compareGroupedSearchEntries(left, right))
+        .map((entry) => entry.result);
+      const bestScore = Math.max(...entries.map((entry) => entry.score), 0);
+      const bestEpisodeKey = Math.min(...entries.map((entry) => entry.episodeKey), 999999);
+      return { groupKey, bestScore, bestEpisodeKey, items };
+    })
+    .sort((left, right) => compareSearchResultGroups(left, right));
+
+  logger.info(`按片名归组搜索结果完成: ${orderedGroups.length} 组`);
+  return orderedGroups;
+}
+
+function compareGroupedSearchEntries(left, right) {
+  // 6.8.3 比较组内条目顺序
+  if (left.score !== right.score) return right.score - left.score;
+  if (left.episodeKey !== right.episodeKey) return left.episodeKey - right.episodeKey;
+  if (left.sourceOrder !== right.sourceOrder) return left.sourceOrder - right.sourceOrder;
+  return left.title.localeCompare(right.title);
+}
+
+function compareSearchResultGroups(left, right) {
+  // 6.8.4 比较片名分组顺序
+  if (left.bestScore !== right.bestScore) return right.bestScore - left.bestScore;
+  if (left.bestEpisodeKey !== right.bestEpisodeKey) return left.bestEpisodeKey - right.bestEpisodeKey;
+  return left.groupKey.localeCompare(right.groupKey);
+}
+
 function scoreSearchResult(result, needles, requestedEpisode) {
-  // 6.8 给搜索结果计算相关度
+  // 6.9 给搜索结果计算相关度
   const title = normalizeComparableText(result.title || "");
   const text = normalizeComparableText(getSearchResultText(result));
   let score = 0;
@@ -740,34 +767,38 @@ function scoreSearchResult(result, needles, requestedEpisode) {
 }
 
 function getSearchResultGroupKey(result, needles) {
-  // 6.9 生成片名分组键
+  // 6.10 生成片名分组键
   const text = normalizeComparableText(getSearchResultText(result));
   const matched = needles.find((needle) => text.includes(needle.normalized));
-  if (matched) return matched.normalized;
+  if (matched) return matched.family || matched.normalized;
+
+  const aliasFamily = findTitleAliasFamily(text);
+  if (aliasFamily) return aliasFamily;
+
   return normalizeComparableText(stripEpisodeTokens(result.title || result.fileName || ""));
 }
 
 function getSearchResultEpisodeKey(result) {
-  // 6.10 生成季集排序键
+  // 6.11 生成季集排序键
   const episodes = extractEpisodeTokens(getSearchResultText(result));
   if (!episodes.length) return 999999;
   return episodes[0].season * 1000 + episodes[0].episode;
 }
 
 function getSourceOrder(source) {
-  // 6.11 固定字幕源排序
-  const order = ["thunder", "subtitlecat", "tvsubtitles", "subf2m", "yify", "moviesubtitles"];
+  // 6.12 固定字幕源排序
+  const order = ["thunder", "subtitlecat", "tvsubtitles", "subf2m", "yify", "moviesubtitles", "addic7ed", "avsubtitles", "aiyi"];
   const index = order.indexOf(source);
   return index >= 0 ? index : order.length;
 }
 
 function getSearchResultText(result) {
-  // 6.12 拼接搜索结果可比较文本
+  // 6.13 拼接搜索结果可比较文本
   return [result.title, result.fileName, result.extra].filter(Boolean).join(" ");
 }
 
 function normalizeComparableText(value) {
-  // 6.13 统一比较文本格式
+  // 6.14 统一比较文本格式
   return String(value || "")
     .toLowerCase()
     .normalize("NFKC")
@@ -775,6 +806,28 @@ function normalizeComparableText(value) {
     .replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function buildTitleAliasFamilyLookup() {
+  // 6.15 建立片名别名归组表
+  const lookup = new Map();
+  for (const group of TITLE_ALIAS_GROUPS) {
+    const family = normalizeComparableText(group[0]);
+    if (!family) continue;
+    for (const alias of group) {
+      const normalized = normalizeComparableText(alias);
+      if (normalized) lookup.set(normalized, family);
+    }
+  }
+  return lookup;
+}
+
+function findTitleAliasFamily(text) {
+  // 6.16 从结果文本中识别片名别名归组
+  for (const [alias, family] of TITLE_ALIAS_FAMILY_LOOKUP.entries()) {
+    if (text.includes(alias)) return family;
+  }
+  return "";
 }
 
 function filterResultsByEpisode(results, episode) {
@@ -837,12 +890,13 @@ async function handlePreview(url, res) {
   // 4.1 查找结果
   const id = (url.searchParams.get("id") || "").trim();
   const language = (url.searchParams.get("lang") || "zh-CN").trim();
-  const result = RESULT_CACHE.get(id);
-  if (!result) {
+  const cachedResult = RESULT_CACHE.get(id);
+  if (!cachedResult) {
     sendJson(res, 404, { error: "结果已过期，请重新搜索" });
     logger.info("预览字幕完成: 未找到结果");
     return;
   }
+  const result = { ...cachedResult };
 
   // 4.2 拉取并解码字幕
   const payload = await fetchSubtitleBytes(result, language);
@@ -875,12 +929,13 @@ async function handleDownload(url, res) {
   // 5.1 查找结果
   const id = (url.searchParams.get("id") || "").trim();
   const language = (url.searchParams.get("lang") || "zh-CN").trim();
-  const result = RESULT_CACHE.get(id);
-  if (!result) {
+  const cachedResult = RESULT_CACHE.get(id);
+  if (!cachedResult) {
     sendJson(res, 404, { error: "结果已过期，请重新搜索" });
     logger.info("下载字幕完成: 未找到结果");
     return;
   }
+  const result = { ...cachedResult };
 
   // 5.2 返回文件字节
   const payload = await fetchSubtitleBytes(result, language);
@@ -1497,7 +1552,7 @@ async function fetchAddic7edShow(query) {
   const response = await fetchWithTimeout(searchUrl, {
     headers: { ...browserHeaders, referer: ADDIC7ED_BASE_URL },
     allowErrorStatus: true,
-    timeoutMs: 42000,
+    timeoutMs: ADDIC7ED_TIMEOUT_MS,
   });
   if (!response.ok) {
     logger.info("查找 Addic7ed 剧集完成: 搜索失败", response.status);
@@ -1549,7 +1604,7 @@ async function fetchAddic7edSeasonHtml(showId, season, referer) {
   const url = `${ADDIC7ED_BASE_URL}/ajax_loadShow.php?show=${encodeURIComponent(showId)}&season=${encodeURIComponent(season)}&langs=&hd=0&hi=0`;
   const response = await fetchWithTimeout(url, {
     headers: { ...browserHeaders, referer: referer || ADDIC7ED_BASE_URL, "x-requested-with": "XMLHttpRequest" },
-    timeoutMs: 42000,
+    timeoutMs: ADDIC7ED_TIMEOUT_MS,
   });
   const html = await response.text();
 
@@ -1627,19 +1682,33 @@ async function searchAvSubtitles(query, language, limit) {
     return [];
   }
 
-  // 16.2 请求搜索页
-  const searchUrl = `${AV_SUBTITLES_BASE_URL}/search_results.php?search=${encodeURIComponent(query)}&category=jav&language=${encodeURIComponent(languageCode)}`;
-  const response = await fetchWithTimeout(searchUrl, {
-    headers: { ...browserHeaders, referer: `${AV_SUBTITLES_BASE_URL}/search` },
-  });
-  const html = await response.text();
-  const movies = parseAvSubtitlesSearchResults(html, query, limit);
+  // 16.2 按编号变体请求搜索页
+  const catalogCode = extractCatalogCode(query);
+  const searchTerms = buildCatalogCodeSearchTerms(query);
+  const movieMap = new Map();
+  let lastSearchUrl = `${AV_SUBTITLES_BASE_URL}/search`;
+  for (const searchTerm of searchTerms) {
+    const searchUrl = `${AV_SUBTITLES_BASE_URL}/search_results.php?search=${encodeURIComponent(searchTerm)}&category=jav&language=${encodeURIComponent(languageCode)}`;
+    const response = await fetchWithTimeout(searchUrl, {
+      headers: { ...browserHeaders, referer: `${AV_SUBTITLES_BASE_URL}/search` },
+    });
+    const html = await response.text();
+    const movies = parseAvSubtitlesSearchResults(html, query, limit, catalogCode);
+    for (const movie of movies) {
+      if (!movieMap.has(movie.detailUrl)) {
+        movieMap.set(movie.detailUrl, movie);
+      }
+    }
+    lastSearchUrl = searchUrl;
+    if (movieMap.size) break;
+  }
+  const movies = [...movieMap.values()];
 
   // 16.3 拉取详情页并解析字幕入口
   const results = [];
   for (const movie of movies.slice(0, 6)) {
     const detailResponse = await fetchWithTimeout(movie.detailUrl, {
-      headers: { ...browserHeaders, referer: searchUrl },
+      headers: { ...browserHeaders, referer: lastSearchUrl },
     });
     const detailHtml = await detailResponse.text();
     results.push(...parseAvSubtitlesDetail(detailHtml, movie, languageCode));
@@ -1662,7 +1731,7 @@ function getAvSubtitlesLanguageCode(language) {
   );
 }
 
-function parseAvSubtitlesSearchResults(html, query, limit) {
+function parseAvSubtitlesSearchResults(html, query, limit, catalogCode = "") {
   /*
    * ================================================================================
    * 步骤17：解析 AVSubtitles 搜索结果
@@ -1674,7 +1743,7 @@ function parseAvSubtitlesSearchResults(html, query, limit) {
   logger.info("开始解析 AVSubtitles 搜索结果...");
 
   // 17.1 提取搜索结果链接
-  const code = extractCatalogCode(query);
+  const code = catalogCode || extractCatalogCode(query);
   const unique = new Map();
   for (const match of String(html || "").matchAll(/<a\b[^>]*href=["']([^"']*\/movie\d+\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     const href = htmlDecode(match[1]);
@@ -1752,14 +1821,42 @@ async function searchAiyi(query, language, limit) {
     logger.info("查询爱译网字幕源完成: 缺少编号");
     return [];
   }
-  const searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(code)}`;
-  const response = await fetchWithTimeout(searchUrl, {
-    headers: { ...browserHeaders, referer: AIYI_BASE_URL },
-  });
-  const html = await response.text();
-  const posts = parseAiyiSearchResults(html, code, limit);
+  const searchTerms = buildCatalogCodeSearchTerms(query);
+  let searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(formatCatalogCode(code, "-"))}`;
+  let posts = [];
+  for (const searchTerm of searchTerms) {
+    const apiUrl = new URL("/wp-json/wp/v2/search", AIYI_BASE_URL);
+    apiUrl.searchParams.set("search", searchTerm);
+    apiUrl.searchParams.set("per_page", String(clamp(limit, 1, 10)));
+    apiUrl.searchParams.set("type", "post");
+    apiUrl.searchParams.set("subtype", "post");
+    try {
+      const response = await fetchWithTimeout(apiUrl.href, {
+        headers: { ...browserHeaders, accept: "application/json,text/plain,*/*", referer: AIYI_BASE_URL },
+      });
+      const payload = await response.json();
+      posts = parseAiyiSearchApiResults(payload, code, limit);
+      searchUrl = apiUrl.href;
+      if (posts.length) break;
+    } catch (error) {
+      logger.warn("爱译网 API 搜索失败", error?.message || error);
+    }
+  }
 
-  // 19.3 解析文章详情
+  // 19.3 接口没有命中时回退 HTML 搜索页
+  if (!posts.length) {
+    for (const searchTerm of searchTerms) {
+      searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(searchTerm)}`;
+      const response = await fetchWithTimeout(searchUrl, {
+        headers: { ...browserHeaders, referer: AIYI_BASE_URL },
+      });
+      const html = await response.text();
+      posts = parseAiyiSearchResults(html, code, limit);
+      if (posts.length) break;
+    }
+  }
+
+  // 19.4 解析文章详情
   const results = [];
   for (const post of posts.slice(0, 8)) {
     const detailResponse = await fetchWithTimeout(post.detailUrl, {
@@ -1773,6 +1870,32 @@ async function searchAiyi(query, language, limit) {
 
   logger.info(`查询爱译网字幕源完成: ${results.length} 条`);
   return results;
+}
+
+function parseAiyiSearchApiResults(items, code, limit) {
+  /*
+   * ================================================================================
+   * 步骤20：解析爱译网接口搜索结果
+   * ================================================================================
+   * 目标：
+   * 1) 读取 WordPress 搜索接口中的文章链接
+   * 2) 只保留编号严格匹配的结果
+   */
+  logger.info("开始解析爱译网接口搜索结果...");
+
+  // 20.1 转成统一文章结构并做编号过滤
+  const unique = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    const title = htmlDecode(String(item?.title || "")).replace(/\s+/g, " ").trim();
+    const detailUrl = String(item?.url || "").trim();
+    const comparable = normalizeCatalogCode(`${title} ${detailUrl}`);
+    if (!detailUrl || !comparable.includes(code)) continue;
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (unique.size >= limit) break;
+  }
+
+  logger.info(`解析爱译网接口搜索结果完成: ${unique.size} 条`);
+  return [...unique.values()];
 }
 
 function parseAiyiSearchResults(html, code, limit) {
@@ -1851,6 +1974,44 @@ function extractCatalogCode(value) {
   // 21.3 提取编号样式代码
   const match = String(value || "").match(/\b([A-Za-z]{2,8})[-_\s]?(\d{2,6})\b/);
   return match ? `${match[1].toUpperCase()}${match[2]}` : "";
+}
+
+function buildCatalogCodeSearchTerms(query) {
+  /*
+   * ================================================================================
+   * 步骤21：生成编号检索词
+   * ================================================================================
+   * 目标：
+   * 1) 兼容带横线、空格和纯连写的编号输入
+   * 2) 给专项字幕源优先使用更容易命中的写法
+   */
+  logger.info("开始生成编号检索词...");
+
+  // 21.1 组装多个站点更容易命中的编号写法
+  const normalized = String(query || "").replace(/\s+/g, " ").trim();
+  const code = extractCatalogCode(normalized);
+  const terms = [];
+  const addTerm = (value) => {
+    const item = String(value || "").replace(/\s+/g, " ").trim();
+    if (!item || terms.some((term) => term.toLowerCase() === item.toLowerCase())) return;
+    terms.push(item);
+  };
+
+  addTerm(formatCatalogCode(code, "-"));
+  addTerm(normalized);
+  addTerm(formatCatalogCode(code, " "));
+  addTerm(code);
+  if (!terms.length) addTerm(normalized);
+
+  logger.info(`生成编号检索词完成: ${terms.join(" | ")}`);
+  return terms;
+}
+
+function formatCatalogCode(code, separator = "-") {
+  // 21.2 生成带分隔符的编号文本
+  const match = String(code || "").trim().match(/^([A-Za-z]{2,8})(\d{2,6})$/);
+  if (!match) return String(code || "").trim();
+  return `${match[1].toUpperCase()}${separator}${match[2]}`;
 }
 
 function normalizeCatalogCode(value) {
@@ -2024,17 +2185,18 @@ async function resolveDownloadUrl(result, language) {
   if (result.source === "subtitlecat" && result.detailUrl) {
     const response = await fetchWithTimeout(result.detailUrl, { headers: browserHeaders });
     const html = await response.text();
-    const lang = escapeRegExp(language || "zh-CN");
-    const byLang =
-      matchFirst(html, new RegExp(`id=["']download_${lang}["'][^>]*href=["']([^"']+)["']`, "i")) ||
-      matchFirst(html, new RegExp(`href=["']([^"']+)["'][^>]*id=["']download_${lang}["']`, "i"));
-    const fallback = matchFirst(html, /href=["']([^"']+\.srt(?:\?[^"']*)?)["']/i);
-    const href = byLang || fallback;
-    if (href) {
-      const resolved = new URL(htmlDecode(href), result.detailUrl).href;
+    const resolved = parseSubtitleCatDirectDownloadUrl(html, result.detailUrl, language);
+    if (resolved) {
       result.downloadUrl = resolved;
+      const resolvedFileName = path.basename(new URL(resolved).pathname);
+      if (resolvedFileName) {
+        result.fileName = sanitizeFileName(resolvedFileName);
+      }
       logger.info("解析真实下载地址完成: subtitlecat");
       return resolved;
+    }
+    if (hasSubtitleCatTranslationButton(html, language)) {
+      throw new Error("SubtitleCat 该语言只有站内翻译按钮，没有可直接下载的字幕");
     }
   }
 
@@ -2108,6 +2270,26 @@ async function resolveDownloadUrl(result, language) {
 
   logger.info("解析真实下载地址完成: empty");
   return "";
+}
+
+function parseSubtitleCatDirectDownloadUrl(html, detailUrl, language) {
+  // 11.2.1 解析 SubtitleCat 已存在的目标语言下载链接
+  const lang = escapeRegExp(language || "zh-CN");
+  const href =
+    matchFirst(html, new RegExp(`id=["']download_${lang}["'][^>]*href=["']([^"']+)["']`, "i")) ||
+    matchFirst(html, new RegExp(`href=["']([^"']+)["'][^>]*id=["']download_${lang}["']`, "i"));
+  return href ? new URL(htmlDecode(href), detailUrl).href : "";
+}
+
+function hasSubtitleCatTranslationButton(html, language) {
+  // 11.2.2 判断 SubtitleCat 是否只有站内翻译按钮
+  const lang = String(language || "zh-CN").trim();
+  return Boolean(String(html || "").match(
+    new RegExp(
+      `translate_from_server_folder\\(\\s*['"]${escapeRegExp(lang)}['"]\\s*,\\s*['"]([^'"]+)['"]\\s*,\\s*['"]([^'"]+)['"]\\s*\\)`,
+      "i"
+    )
+  ));
 }
 
 function parseJavaScriptLocation(html) {
@@ -2259,7 +2441,7 @@ function scoreSubtitleEntry(fileName, language) {
 
 function cacheResult(result) {
   // 3.4 缓存结果供预览和下载接口复用
-  const key = `${result.source}|${result.title}|${result.detailUrl}|${result.downloadUrl}`;
+  const key = `${result.source}|${result.title}|${result.detailUrl}|${result.downloadUrl}|${result.language}|${result.fileName}`;
   const id = createHash("sha1").update(key).digest("hex").slice(0, 16);
   const cached = { ...result, id };
   RESULT_CACHE.set(id, cached);
@@ -2349,10 +2531,48 @@ async function fetchWithTimeout(url, options = {}) {
     }
     logger.info("请求远程资源完成", response.status, url);
     return response;
+  } catch (error) {
+    // 11.3 标准化请求错误信息
+    const message = normalizeRemoteErrorMessage(error, url, timeoutMs);
+    logger.info("请求远程资源完成: 失败", message);
+    throw new Error(message);
   } finally {
-    // 11.3 清理计时器
+    // 11.4 清理计时器
     if (timer) clearTimeout(timer);
   }
+}
+
+function normalizeRemoteErrorMessage(error, url, timeoutMs) {
+  /*
+   * ================================================================================
+   * 步骤12：标准化远程请求错误
+   * ================================================================================
+   * 目标：
+   * 1) 把 fetch failed 这类模糊报错转成可读信息
+   * 2) 给源状态面板返回更具体的失败原因
+   */
+  logger.info("开始标准化远程请求错误...");
+
+  // 12.1 识别超时、连接失败和其他网络错误
+  const target = new URL(url);
+  const code = String(error?.cause?.code || error?.code || "").trim();
+  const rawMessage = String(error?.cause?.message || error?.message || "").trim();
+  let message = rawMessage || `请求失败: ${target.host}`;
+
+  if (error?.name === "AbortError") {
+    message = `请求超时(${timeoutMs}ms): ${target.host}`;
+  } else if (code === "UND_ERR_CONNECT_TIMEOUT") {
+    message = `连接超时: ${target.host}`;
+  } else if (code === "ECONNRESET") {
+    message = `连接被重置: ${target.host}`;
+  } else if (code === "ENOTFOUND") {
+    message = `域名解析失败: ${target.host}`;
+  } else if (rawMessage === "fetch failed") {
+    message = `请求失败: ${target.host}`;
+  }
+
+  logger.info("标准化远程请求错误完成", message);
+  return message;
 }
 
 function nodeFetchCompat(url, options = {}) {

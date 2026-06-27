@@ -12,7 +12,7 @@ async function boot() {
   console.info("[subtitle-finder-mobile]", "开始启动 Android 内置服务...");
 
   // 1.1 加载服务包
-  const { startServer } = require("./server.cjs");
+  const { startServer } = require("./server-alt.cjs");
 
   // 1.2 启动本机 HTTP 服务
   const service = await startServer({ host: "127.0.0.1", port: 8765 });

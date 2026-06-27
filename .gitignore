@@ -15,3 +15,4 @@ builder-debug.yml
 build/icon_variant_*.png
 public/nodejs/server.cjs
 public/nodejs/public/
+_regression/

@@ -19,14 +19,25 @@
             <div class="brand-mark" aria-hidden="true">S</div>
             <div>
               <h1>字幕检索台</h1>
-              <p>建议精准搜索 · v1.1.4</p>
+              <p>建议精准搜索 · v1.1.5</p>
             </div>
           </div>
 
           <form id="searchForm" class="search-form">
             <label for="queryInput">搜索字段</label>
             <div class="input-stack">
-              <input id="queryInput" name="q" autocomplete="off" />
+              <div class="input-shell">
+                <input id="queryInput" name="q" autocomplete="off" />
+                <button
+                  id="clearQueryButton"
+                  class="ghost-icon-button"
+                  type="button"
+                  aria-label="清空搜索字段"
+                  title="清空搜索字段"
+                >
+                  <span aria-hidden="true">×</span>
+                </button>
+              </div>
               <button type="submit" title="搜索">
                 <span aria-hidden="true">⌕</span>
                 <span>搜索</span>
@@ -89,6 +100,7 @@
             <div class="results-actions">
               <button id="batchDownloadButton" type="button" aria-disabled="true">批量下载</button>
               <div id="statusBadge" class="status-badge">就绪</div>
+              <button id="aboutButton" type="button" class="icon-button" aria-label="关于" title="关于">ⓘ</button>
             </div>
           </header>
 
@@ -135,6 +147,38 @@
         </section>
       </section>
     </main>
+
+    <div id="aboutModal" class="modal-backdrop" hidden>
+      <section class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="aboutTitle" tabindex="-1">
+        <header class="about-header">
+          <div>
+            <h2 id="aboutTitle">关于</h2>
+            <p>SubtitleFinder · v1.1.5</p>
+          </div>
+          <button
+            id="closeAboutButton"
+            type="button"
+            class="ghost-icon-button"
+            data-about-close="true"
+            aria-label="关闭关于"
+            title="关闭关于"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="about-body">
+          <p>源码：<a href="https://github.com/daoran9/subtitle-finder" target="_blank" rel="noreferrer">github.com/daoran9/subtitle-finder</a></p>
+          <p>授权：PolyForm Noncommercial 1.0.0</p>
+          <p>用途：仅限非商业使用。</p>
+          <p>条款：<a href="https://polyformproject.org/licenses/noncommercial/1.0.0/" target="_blank" rel="noreferrer">polyformproject.org/licenses/noncommercial/1.0.0</a></p>
+        </div>
+
+        <footer class="about-footer">
+          <button id="closeAboutFooterButton" type="button" data-about-close="true">关闭</button>
+        </footer>
+      </section>
+    </div>
 
     <script src="/capacitor.js"></script>
     <script src="/mobile.js"></script>

@@ -1,8 +1,17 @@
 {
   "name": "subtitle-finder",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Local subtitle search desktop app",
-  "license": "AGPL-3.0-only",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "daoran9",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daoran9/subtitle-finder.git"
+  },
+  "homepage": "https://github.com/daoran9/subtitle-finder",
+  "bugs": {
+    "url": "https://github.com/daoran9/subtitle-finder/issues"
+  },
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -13,7 +22,7 @@
     "build:win:installer": "electron-builder --win nsis --x64 --publish never",
     "sync:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android",
     "build:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && set GRADLE_USER_HOME=..\\.gradle-cache&& .\\gradlew.bat assembleDebug",
-    "build:android:release": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && .\\gradlew.bat assembleRelease",
+    "build:android:release": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && set GRADLE_USER_HOME=..\\.gradle-cache&& .\\gradlew.bat assembleRelease",
     "check": "node --check server.mjs && node --check public/app.js && node --check public/mobile.js && node --check public/nodejs/main.js && node --check scripts/sync-mobile-nodejs.mjs && node --check electron/main.mjs && node --check electron/preload.cjs"
   },
   "build": {
@@ -52,6 +61,7 @@
     },
     "nsis": {
       "oneClick": false,
+      "runAfterFinish": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,

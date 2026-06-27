@@ -11,6 +11,23 @@ const targetPublicDir = path.join(targetDir, "public");
 
 await mkdir(targetDir, { recursive: true });
 
+async function removeWithRetry(targetPath, options = {}) {
+  const retries = options.retries ?? 8;
+  const delayMs = options.delayMs ?? 250;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      await rm(targetPath, { force: true, recursive: Boolean(options.recursive) });
+      return;
+    } catch (error) {
+      if ((error?.code !== "EPERM" && error?.code !== "EBUSY") || attempt === retries) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 /*
  * ================================================================================
  * 步骤1：同步 Android Node 服务文件
@@ -22,9 +39,7 @@ await mkdir(targetDir, { recursive: true });
 console.info("[sync-mobile-nodejs]", "开始同步 Android Node 服务文件...");
 
 // 1.1 清理旧产物
-await rm(path.join(targetDir, "server.cjs"), { force: true });
-await rm(path.join(targetDir, "server.mjs"), { force: true });
-await rm(targetPublicDir, { recursive: true, force: true });
+await removeWithRetry(path.join(targetDir, "server.mjs"));
 
 // 1.2 打包服务端为旧 Node 可运行格式
 await build({
@@ -33,7 +48,7 @@ await build({
   platform: "node",
   format: "cjs",
   target: "node12.19",
-  outfile: path.join(targetDir, "server.cjs"),
+  outfile: path.join(targetDir, "server-alt.cjs"),
   banner: {
     js: "const import_meta_url = require('url').pathToFileURL(__filename).href;",
   },
@@ -56,9 +71,9 @@ for (const fileName of ["index.html", "styles.css", "app.js", "mobile.js", "capa
 }
 
 // 1.5 清理早期测试产物
-await rm(path.join(targetDir, "_test_server.cjs"), { force: true });
-await rm(path.join(targetDir, "_test2.cjs"), { force: true });
-await rm(path.join(targetDir, "_test3.cjs"), { force: true });
-await rm(path.join(projectRoot, "mobile-www"), { recursive: true, force: true });
+await removeWithRetry(path.join(targetDir, "_test_server.cjs"));
+await removeWithRetry(path.join(targetDir, "_test2.cjs"));
+await removeWithRetry(path.join(targetDir, "_test3.cjs"));
+await removeWithRetry(path.join(projectRoot, "mobile-www"), { recursive: true });
 
 console.info("[sync-mobile-nodejs]", "同步 Android Node 服务文件完成");
