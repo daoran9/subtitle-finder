@@ -88,11 +88,16 @@ async function bootApp() {
     shell.openExternal(url);
   });
 
+  mainWindow.once("ready-to-show", () => {
+    bringMainWindowToFront();
+  });
+  mainWindow.webContents.once("did-finish-load", () => {
+    bringMainWindowToFront();
+  });
+
   // 1.6 加载本地页面
   await mainWindow.loadURL(service.url);
-  mainWindow.once("ready-to-show", () => {
-    mainWindow?.show();
-  });
+  bringMainWindowToFront();
   mainWindow.on("close", () => {
     saveWindowState(mainWindow);
   });
@@ -101,6 +106,35 @@ async function bootApp() {
   });
 
   logger.info("桌面应用启动完成", service.url);
+}
+
+function bringMainWindowToFront() {
+  /*
+   * ================================================================================
+   * 步骤1.7：显示主窗口
+   * ================================================================================
+   * 目标：
+   * 1) 兜住 ready-to-show 事件丢失
+   * 2) 二次启动时把已存在的隐藏窗口拉出来
+   */
+  logger.info("开始显示主窗口...");
+
+  // 1.7.1 校验主窗口
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    logger.info("显示主窗口完成: 无可用窗口");
+    return;
+  }
+
+  // 1.7.2 恢复并显示窗口
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+  mainWindow.focus();
+
+  logger.info("显示主窗口完成");
 }
 
 /*
@@ -612,14 +646,15 @@ function bindAppLifecycle() {
   // 16.2 重复打开时聚焦已有窗口
   app.on("second-instance", () => {
     if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    bringMainWindowToFront();
   });
 
   // 16.3 macOS 激活兼容，Windows 下不会影响行为
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       bootApp().catch(handleStartupFailure);
+    } else {
+      bringMainWindowToFront();
     }
   });
 
