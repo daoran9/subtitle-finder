@@ -1,4 +1,5 @@
 const { channel } = require("bridge");
+const path = require("path");
 
 async function boot() {
   /*
@@ -15,7 +16,8 @@ async function boot() {
   const { startServer } = require("./server-alt.cjs");
 
   // 1.2 启动本机 HTTP 服务
-  const service = await startServer({ host: "127.0.0.1", port: 8765 });
+  const dataDir = path.join(__dirname, "..", "..", "subtitle-finder-data");
+  const service = await startServer({ host: "127.0.0.1", port: 8765, dataDir });
 
   // 1.3 通知前端服务已就绪
   channel.send("subtitle-finder:ready", { url: service.url });

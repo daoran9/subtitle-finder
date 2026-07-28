@@ -19,6 +19,7 @@
     info: (...args) => console.info("[SubtitleFinderMobile]", ...args),
     error: (...args) => console.error("[SubtitleFinderMobile]", ...args),
   };
+  let mobileServiceReady = false;
 
   /*
    * ================================================================================
@@ -32,6 +33,7 @@
 
   // 1.1 暴露保存、选目录和视频扫描接口
   win.subtitleFinder = {
+    platform: "android",
     async selectDownloadDir() {
       logger.info("开始选择移动端保存目录...");
 
@@ -45,7 +47,7 @@
       logger.info("选择移动端保存目录完成", (result && result.label) || (result && result.directory) || "cancel");
       return result;
     },
-    async selectVideoDir() {
+    async selectVideoDir(payload = {}) {
       logger.info("开始选择移动端视频目录...");
 
       // 1.3 调用 Android 原生视频目录扫描
@@ -54,8 +56,36 @@
         logger.info("选择移动端视频目录完成: native missing");
         return { selected: false, error: "当前 Android 包缺少视频目录扫描能力" };
       }
-      const result = await nativePlugin.selectVideoDir();
+      const result = await nativePlugin.selectVideoDir({
+        excludeRules: Array.isArray(payload.excludeRules) ? payload.excludeRules : [],
+      });
       logger.info("选择移动端视频目录完成", result && Array.isArray(result.files) ? result.files.length : 0);
+      return result;
+    },
+    async selectVideoFile() {
+      logger.info("开始选择移动端单个视频...");
+
+      // 1.3.1 调用 Android 原生单文件选择器
+      const nativePlugin = getNativePlugin();
+      if (!nativePlugin || !nativePlugin.selectVideoFile) {
+        logger.info("选择移动端单个视频完成: native missing");
+        return { selected: false, error: "当前 Android 包缺少单视频选择能力" };
+      }
+      const result = await nativePlugin.selectVideoFile();
+      logger.info("选择移动端单个视频完成", result && result.videoPath ? result.videoPath : "cancel");
+      return result;
+    },
+    async inspectVideo(payload = {}) {
+      logger.info("开始分析移动端视频...");
+
+      // 1.4 调用 Android 原生指纹和内封字幕检测
+      const nativePlugin = getNativePlugin();
+      if (!nativePlugin || !nativePlugin.inspectVideo) {
+        logger.info("分析移动端视频完成: native missing");
+        return { ok: false, error: "当前 Android 包缺少视频分析能力" };
+      }
+      const result = await nativePlugin.inspectVideo({ videoPath: String(payload.videoPath || "") });
+      logger.info("分析移动端视频完成", result && result.ok ? "ok" : "failed");
       return result;
     },
     async saveSubtitle(payload = {}) {
@@ -71,12 +101,14 @@
       // 1.5 校验保存位置和下载地址
       const downloadUrl = String(payload.downloadUrl || "");
       const requestedFileName = sanitizeMobileFileName(payload.fileName || "subtitle.srt");
+      const preferredBaseName = String(payload.preferredBaseName || "").trim();
       const downloadDir = String(payload.downloadDir || "");
+      const targetDirectory = String(payload.targetDirectory || "");
       if (!downloadUrl) {
         logger.info("保存移动端字幕完成: missing url");
         return { saved: false, error: "没有可下载的字幕" };
       }
-      if (!downloadDir) {
+      if (!targetDirectory && !downloadDir) {
         logger.info("保存移动端字幕完成: missing directory");
         return { saved: false, error: "请先选择存放位置" };
       }
@@ -95,10 +127,14 @@
       }
 
       const responseFileName = parseDownloadFileName(response.headers.get("content-disposition") || "");
-      const fileName = sanitizeMobileFileName(responseFileName || requestedFileName);
+      const sourceFileName = sanitizeMobileFileName(responseFileName || requestedFileName);
+      const fileName = preferredBaseName
+        ? buildPreferredMobileFileName(sourceFileName, preferredBaseName)
+        : sourceFileName;
       const base64 = await blobToBase64(await response.blob());
       const result = await nativePlugin.saveSubtitle({
         downloadDir,
+        targetDirectory,
         fileName,
         base64,
         mimeType: response.headers.get("content-type") || "application/octet-stream",
@@ -123,11 +159,23 @@
 
   // 2.1 展示启动状态
   document.addEventListener("DOMContentLoaded", () => {
+    logger.info("开始更新移动端启动状态...");
+
+    // 2.1.1 服务已提前就绪时不再覆盖成启动中
     document.body.dataset.mobileBoot = "true";
     const status = document.querySelector("#statusBadge");
     const summary = document.querySelector("#resultSummary");
+    if (mobileServiceReady) {
+      if (status) status.textContent = "就绪";
+      if (summary) summary.textContent = "等待搜索";
+      logger.info("更新移动端启动状态完成: ready");
+      return;
+    }
+
+    // 2.1.2 服务尚未就绪时展示等待状态
     if (status) status.textContent = "启动中";
     if (summary) summary.textContent = "正在启动移动端服务";
+    logger.info("更新移动端启动状态完成: pending");
   });
 
   // 2.2 监听服务启动完成
@@ -247,6 +295,27 @@
     return safe || "subtitle.srt";
   }
 
+  function buildPreferredMobileFileName(sourceFileName, preferredBaseName) {
+    /*
+     * ================================================================================
+     * 步骤6.2：生成移动端视频同名字幕文件名
+     * ================================================================================
+     * 目标：
+     * 1) 保留字幕源返回的真实扩展名
+     * 2) 使用“视频主文件名.语言”作为保存文件名
+     */
+    logger.info("开始生成移动端视频同名字幕文件名...");
+
+    // 6.2.1 读取来源扩展名并组合首选名称
+    const sourceName = sanitizeMobileFileName(sourceFileName || "subtitle.srt");
+    const extensionMatch = sourceName.match(/(\.[^.]+)$/);
+    const extension = extensionMatch ? extensionMatch[1] : ".srt";
+    const finalName = sanitizeMobileFileName(`${preferredBaseName}${extension}`);
+
+    logger.info("生成移动端视频同名字幕文件名完成", finalName);
+    return finalName;
+  }
+
   function parseDownloadFileName(value) {
     /*
      * ================================================================================
@@ -295,8 +364,9 @@
      */
     logger.info("开始记录移动端服务地址...", url);
 
-    // 8.1 保存 API 根地址
+    // 8.1 保存 API 根地址和明确的就绪状态
     win.subtitleFinderApiBase = String(url || "http://127.0.0.1:8765/").replace(/\/+$/, "");
+    mobileServiceReady = true;
 
     // 8.2 更新启动状态
     const status = document.querySelector("#statusBadge");

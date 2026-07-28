@@ -1,7 +1,7 @@
 {
   "name": "subtitle-finder",
-  "version": "1.1.5",
-  "description": "Local subtitle search desktop app",
+  "version": "1.1.6",
+  "description": "Local-first subtitle search and management app for Windows and Android",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "daoran9",
   "repository": {
@@ -17,13 +17,15 @@
   "scripts": {
     "start": "node server.mjs",
     "app": "electron .",
-    "build:win": "electron-builder --win portable nsis --x64 --publish never",
-    "build:win:portable": "electron-builder --win portable --x64 --publish never",
-    "build:win:installer": "electron-builder --win nsis --x64 --publish never",
+    "prepare:sync-tools": "node scripts/prepare-sync-tools.mjs",
+    "build:win": "npm run prepare:sync-tools && electron-builder --win portable nsis --x64 --publish never",
+    "build:win:portable": "npm run prepare:sync-tools && electron-builder --win portable --x64 --publish never",
+    "build:win:installer": "npm run prepare:sync-tools && electron-builder --win nsis --x64 --publish never",
     "sync:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android",
-    "build:android": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && set GRADLE_USER_HOME=..\\.gradle-cache&& .\\gradlew.bat assembleDebug",
-    "build:android:release": "node scripts/sync-mobile-nodejs.mjs && npx cap sync android && cd android && set GRADLE_USER_HOME=..\\.gradle-cache&& .\\gradlew.bat assembleRelease",
-    "check": "node --check server.mjs && node --check public/app.js && node --check public/mobile.js && node --check public/nodejs/main.js && node --check scripts/sync-mobile-nodejs.mjs && node --check electron/main.mjs && node --check electron/preload.cjs"
+    "build:android": "node scripts/build-android.mjs debug",
+    "build:android:release": "node scripts/build-android.mjs release",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check server.mjs && node --check lib/subtitle-sync.mjs && node --check public/conversion-dictionary.js && node --check public/media-library.js && node --check public/scan-rules.js && node --check public/subtitle-rules.js && node --check public/app.js && node --check public/mobile.js && node --check public/nodejs/main.js && node --check scripts/prepare-sync-tools.mjs && node --check scripts/sync-mobile-nodejs.mjs && node --check scripts/build-android.mjs && node --check electron/main.mjs && node --check electron/preload.cjs"
   },
   "build": {
     "appId": "local.subtitle.finder",
@@ -34,13 +36,38 @@
     "icon": "build/icon.ico",
     "files": [
       "server.mjs",
+      "lib/**/*",
       "public/**/*",
+      "!public/nodejs/**/*",
       "electron/**/*",
       "electron/preload.cjs",
+      "vendor/**/*",
+      "!vendor/sync-tools/**/*",
       "build/icon.ico",
       "build/icon.png",
       "LICENSE",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "licenses/SubtitleFinder-LICENSE.txt"
+      },
+      {
+        "from": "vendor/THIRD_PARTY_LICENSES.md",
+        "to": "licenses/THIRD_PARTY_LICENSES.md"
+      },
+      {
+        "from": "vendor/licenses",
+        "to": "licenses/third-party"
+      },
+      {
+        "from": "vendor/sync-tools/win32-x64",
+        "to": "sync-tools",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "electronDist": "node_modules/electron/dist",
     "win": {
@@ -69,13 +96,22 @@
     }
   },
   "devDependencies": {
-    "@capacitor/cli": "^3.9.0",
     "@capacitor/android": "^3.9.0",
+    "@capacitor/cli": "^3.9.0",
     "@capacitor/core": "^3.9.0",
     "@capacitor/filesystem": "^1.1.0",
     "capacitor-nodejs": "^0.0.1",
     "electron": "^42.3.0",
     "electron-builder": "^26.8.1",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "extract-zip": "^2.0.1"
+  },
+  "dependencies": {
+    "7z-wasm": "^1.2.0",
+    "fast-xml-parser": "^5.10.1",
+    "iconv-lite": "^0.6.3",
+    "mediainfo.js": "^0.3.7",
+    "node-unrar-js": "^2.0.2",
+    "opencc-js": "^1.4.1"
   }
 }

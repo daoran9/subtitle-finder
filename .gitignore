@@ -6,6 +6,7 @@ dist/
 .privacy-scan-asar/
 .downloads/
 .subtitle-finder-data/
+.playwright-cli/
 .gradle-cache/
 android/keystore.properties
 android/keystores/
@@ -14,5 +15,14 @@ CONTEXT.md
 builder-debug.yml
 build/icon_variant_*.png
 public/nodejs/server.cjs
+public/nodejs/server-alt.cjs
 public/nodejs/public/
+public/nodejs/vendor/
 _regression/
+_regression-*
+output/playwright/
+.research/
+.cache/
+vendor/sync-tools/
+.tmp-ffsubsync-probe/
+.tmp-ffmpeg-static/

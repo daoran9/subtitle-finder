@@ -19,7 +19,7 @@
             <div class="brand-mark" aria-hidden="true">S</div>
             <div>
               <h1>字幕检索台</h1>
-              <p>建议精准搜索 · v1.1.5</p>
+              <p>建议精准搜索 · v1.1.6</p>
             </div>
           </div>
 
@@ -50,6 +50,10 @@
                 <select id="sourceSelect" name="source">
                   <option value="all">全部</option>
                   <option value="thunder">迅雷字幕</option>
+                  <option value="shooter">射手网指纹（本地视频）</option>
+                  <option value="thunder-fingerprint">迅雷指纹（本地视频）</option>
+                  <option value="assrt">ASSRT</option>
+                  <option value="subhd">SubHD</option>
                   <option value="subtitlecat">SubtitleCat</option>
                   <option value="yify">YIFY Subtitles</option>
                   <option value="subf2m">Subf2m</option>
@@ -69,6 +73,10 @@
                   <option value="ja">日文</option>
                 </select>
               </label>
+              <label class="full-field">
+                ASSRT Token（可选）
+                <input id="assrtTokenInput" type="password" autocomplete="off" spellcheck="false" />
+              </label>
             </div>
           </form>
 
@@ -83,10 +91,51 @@
           <div class="video-block">
             <div class="section-title">
               <span>视频文件</span>
-              <button id="scanVideoButton" type="button">文件夹</button>
+              <div class="section-actions">
+                <button id="selectVideoButton" type="button">单个</button>
+                <button id="scanVideoButton" type="button">文件夹</button>
+              </div>
+            </div>
+            <div id="videoScanMeta" class="video-scan-meta" hidden>
+              <span id="videoScanSummary"></span>
+              <label>
+                <input id="missingOnlyToggle" type="checkbox" checked />
+                仅缺字幕
+              </label>
             </div>
             <div id="videoList" class="video-list">
               <span class="muted">未选择</span>
+            </div>
+            <div id="batchPanel" class="batch-panel" hidden>
+              <div class="batch-settings">
+                <label>
+                  命名
+                  <select id="namingPresetSelect">
+                    <option value="media-server">通用</option>
+                    <option value="emby">Emby</option>
+                    <option value="jellyfin">Jellyfin</option>
+                    <option value="plex">Plex</option>
+                    <option value="same-name">视频同名</option>
+                  </select>
+                </label>
+                <label>
+                  并发
+                  <select id="batchConcurrencySelect">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                  </select>
+                </label>
+              </div>
+              <div class="batch-actions">
+                <button id="startBatchButton" type="button">匹配字幕</button>
+                <button id="pauseBatchButton" type="button" disabled>暂停</button>
+                <button id="retryBatchButton" type="button" disabled>重试</button>
+              </div>
+              <div id="batchProgress" class="batch-progress" aria-live="polite">
+                <progress max="1" value="0"></progress>
+                <span>尚未开始</span>
+              </div>
             </div>
           </div>
         </aside>
@@ -100,6 +149,7 @@
             <div class="results-actions">
               <button id="batchDownloadButton" type="button" aria-disabled="true">批量下载</button>
               <div id="statusBadge" class="status-badge">就绪</div>
+              <button id="settingsButton" type="button" class="icon-button" aria-label="设置" title="设置" hidden>⚙</button>
               <button id="aboutButton" type="button" class="icon-button" aria-label="关于" title="关于">ⓘ</button>
             </div>
           </header>
@@ -116,13 +166,12 @@
                   <th>来源</th>
                   <th>文件名</th>
                   <th>语言</th>
-                  <th>分数</th>
                   <th>下载</th>
                 </tr>
               </thead>
               <tbody id="resultsBody">
                 <tr class="empty-row">
-                  <td colspan="6">输入字段后开始搜索。</td>
+                  <td colspan="5">输入字段后开始搜索。</td>
                 </tr>
               </tbody>
             </table>
@@ -137,11 +186,26 @@
             </div>
             <div class="preview-actions">
               <button id="closePreviewButton" type="button" class="mobile-only" aria-label="关闭预览">×</button>
+              <label class="conversion-control" title="生成新的简体或繁体字幕文件">
+                <span>转换</span>
+                <select id="conversionSelect" aria-label="简繁转换">
+                  <option value="">原文</option>
+                  <option value="zh-CN">简体</option>
+                  <option value="zh-TW">繁体</option>
+                </select>
+              </label>
               <button id="copyButton" type="button" title="复制字幕内容">复制</button>
               <button id="chooseDirButton" type="button" title="选择存放位置">位置</button>
+              <button id="syncButton" type="button" title="按当前本地视频自动校时" hidden disabled>校时</button>
+              <button id="cancelSyncButton" type="button" title="取消自动校时" hidden>取消</button>
               <button id="downloadButton" type="button" class="download-link" aria-disabled="true" title="下载到已选位置">下载</button>
             </div>
           </header>
+
+          <div id="syncProgress" class="sync-progress" aria-live="polite" hidden>
+            <progress max="100" value="0"></progress>
+            <span id="syncStatus">等待校时</span>
+          </div>
 
           <pre id="previewText" class="preview-text">点击左侧结果查看字幕内容。</pre>
         </section>
@@ -153,7 +217,7 @@
         <header class="about-header">
           <div>
             <h2 id="aboutTitle">关于</h2>
-            <p>SubtitleFinder · v1.1.5</p>
+            <p>SubtitleFinder · v1.1.6</p>
           </div>
           <button
             id="closeAboutButton"
@@ -172,6 +236,7 @@
           <p>授权：PolyForm Noncommercial 1.0.0</p>
           <p>用途：仅限非商业使用。</p>
           <p>条款：<a href="https://polyformproject.org/licenses/noncommercial/1.0.0/" target="_blank" rel="noreferrer">polyformproject.org/licenses/noncommercial/1.0.0</a></p>
+          <p><button id="thirdPartyLicensesButton" type="button" class="text-link-button">第三方组件与许可</button></p>
         </div>
 
         <footer class="about-footer">
@@ -180,8 +245,49 @@
       </section>
     </div>
 
+    <div id="settingsModal" class="modal-backdrop" hidden>
+      <section class="about-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
+        <header class="about-header">
+          <div>
+            <h2 id="settingsTitle">设置</h2>
+            <p id="settingsPlatformLabel">扫描与转换</p>
+          </div>
+          <button
+            id="closeSettingsButton"
+            type="button"
+            class="ghost-icon-button"
+            data-settings-close="true"
+            aria-label="关闭设置"
+            title="关闭设置"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="about-body settings-body">
+          <label class="settings-field" for="scanExclusionRulesInput">
+            <span>扫描排除规则</span>
+            <textarea id="scanExclusionRulesInput" rows="4" spellcheck="false" placeholder="**/Extras/**&#10;*.sample.*"></textarea>
+          </label>
+          <label class="settings-field" for="customDictionaryInput">
+            <span>自定义简繁词库</span>
+            <textarea id="customDictionaryInput" rows="4" spellcheck="false" placeholder="软件=軟件&#10;出租车=計程車"></textarea>
+          </label>
+          <label id="contextMenuSetting" class="toggle-row" hidden>
+            <span>Windows 右键查字幕</span>
+            <input id="contextMenuToggle" type="checkbox" />
+          </label>
+          <p id="settingsMessage" class="settings-message" aria-live="polite"></p>
+        </div>
+
+        <footer class="about-footer settings-footer">
+          <button id="saveSettingsButton" type="button">保存</button>
+        </footer>
+      </section>
+    </div>
+
     <script src="/capacitor.js"></script>
     <script src="/mobile.js"></script>
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

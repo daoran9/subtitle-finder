@@ -66,11 +66,59 @@ await copyFile(
 
 // 1.4 同步静态资源到 Node 运行目录
 await mkdir(targetPublicDir, { recursive: true });
-for (const fileName of ["index.html", "styles.css", "app.js", "mobile.js", "capacitor.js", "capacitor-early-bridge.js"]) {
+for (const fileName of [
+  "index.html",
+  "styles.css",
+  "conversion-dictionary.js",
+  "media-library.js",
+  "scan-rules.js",
+  "subtitle-rules.js",
+  "app.js",
+  "mobile.js",
+  "capacitor.js",
+  "capacitor-early-bridge.js",
+]) {
   await copyFile(path.join(projectRoot, "public", fileName), path.join(targetPublicDir, fileName));
 }
 
-// 1.5 清理早期测试产物
+// 1.5 同步压缩包解码 WASM 运行文件
+await mkdir(path.join(targetDir, "vendor"), { recursive: true });
+for (const [sourcePath, fileName] of [
+  [path.join(projectRoot, "vendor", "unrar.wasm"), "unrar.wasm"],
+  [path.join(projectRoot, "vendor", "7zz.wasm"), "7zz.wasm"],
+]) {
+  await copyFile(sourcePath, path.join(targetDir, "vendor", fileName));
+}
+
+// 1.6 同步第三方许可清单和完整许可正文
+await copyFile(
+  path.join(projectRoot, "vendor", "THIRD_PARTY_LICENSES.md"),
+  path.join(targetDir, "vendor", "THIRD_PARTY_LICENSES.md")
+);
+await mkdir(path.join(targetDir, "vendor", "licenses"), { recursive: true });
+await copyFile(
+  path.join(projectRoot, "LICENSE"),
+  path.join(targetDir, "vendor", "licenses", "SubtitleFinder-LICENSE.txt")
+);
+for (const fileName of [
+  "7z-wasm-LICENSE.txt",
+  "7z-wasm-unRAR-LICENSE.txt",
+  "node-unrar-js-LICENSE.md",
+  "mediainfo.js-LICENSE.txt",
+  "ChineseSubFinder-LICENSE.txt",
+  "opencc-js-LICENSE.txt",
+  "opencc-js-THIRD_PARTY_LICENSES.md",
+  "fast-xml-parser-LICENSE.txt",
+  "iconv-lite-LICENSE.md",
+  "safer-buffer-LICENSE.md",
+]) {
+  await copyFile(
+    path.join(projectRoot, "vendor", "licenses", fileName),
+    path.join(targetDir, "vendor", "licenses", fileName)
+  );
+}
+
+// 1.7 清理早期测试产物
 await removeWithRetry(path.join(targetDir, "_test_server.cjs"));
 await removeWithRetry(path.join(targetDir, "_test2.cjs"));
 await removeWithRetry(path.join(targetDir, "_test3.cjs"));
