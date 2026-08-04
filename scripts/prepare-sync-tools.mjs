@@ -176,7 +176,7 @@ async function downloadVerifiedFile(definition) {
   const temporaryPath = `${filePath}.download`;
   await rm(temporaryPath, { force: true });
   const response = await fetch(definition.url, {
-    headers: { "user-agent": "SubtitleFinder-license-fetch/1.1.6" },
+    headers: { "user-agent": "SubtitleFinder-license-fetch/1.6.1" },
     redirect: "follow",
   });
   if (!response.ok || !response.body) throw new Error(`下载失败: ${response.status} ${definition.fileName}`);

@@ -41,6 +41,7 @@ const state = {
   syncStatus: "idle",
   syncProgress: 0,
   syncMessage: "",
+  downloadSaving: false,
 };
 const PREVIEW_TIMEOUT_MS = 20000;
 const SEARCH_TIMEOUT_MS = 48000;
@@ -74,6 +75,7 @@ const nodes = {
   cancelSyncButton: document.querySelector("#cancelSyncButton"),
   syncProgress: document.querySelector("#syncProgress"),
   syncStatus: document.querySelector("#syncStatus"),
+  previewFeedback: document.querySelector("#previewFeedback"),
   downloadButton: document.querySelector("#downloadButton"),
   conversionSelect: document.querySelector("#conversionSelect"),
   batchDownloadButton: document.querySelector("#batchDownloadButton"),
@@ -1007,6 +1009,10 @@ async function previewSubtitle(id, options = {}) {
 
   // 4.2 更新选择状态
   state.selectedId = id;
+  state.downloadUrl = "";
+  state.downloadFileName = "";
+  clearPreviewFeedback();
+  setDownloadButtonAvailable(false);
   setActiveRow(id);
   setStatus("读取中", "busy");
   nodes.previewText.textContent = "正在读取字幕内容...";
@@ -1032,7 +1038,7 @@ async function previewSubtitle(id, options = {}) {
     nodes.previewMeta.textContent = [data.source, data.fileName, formatBytes(data.size), data.encoding, validationText, languageHint, conversionText].filter(Boolean).join(" · ");
     state.downloadUrl = absoluteApiUrl(`/api/download?${params.toString()}`);
     state.downloadFileName = data.fileName || "subtitle.srt";
-    nodes.downloadButton.setAttribute("aria-disabled", "false");
+    setDownloadButtonAvailable(true);
     renderSubtitleSyncState();
     setStatus("已读取", "ok");
     logger.info("预览字幕完成");
@@ -1041,7 +1047,7 @@ async function previewSubtitle(id, options = {}) {
       if (state.previewController === controller) {
         nodes.previewText.textContent = "预览超时，已停止等待。";
         nodes.previewMeta.textContent = "读取超时";
-        nodes.downloadButton.setAttribute("aria-disabled", "true");
+        setDownloadButtonAvailable(false);
         renderSubtitleSyncState();
         setStatus("超时", "warn");
       }
@@ -1053,7 +1059,7 @@ async function previewSubtitle(id, options = {}) {
     state.downloadFileName = "";
     nodes.previewText.textContent = String(error.message || error);
     nodes.previewMeta.textContent = "读取失败";
-    nodes.downloadButton.setAttribute("aria-disabled", "true");
+    setDownloadButtonAvailable(false);
     renderSubtitleSyncState();
     setStatus("失败", "error");
     logger.error("预览字幕失败", error);
@@ -1078,14 +1084,73 @@ async function copyPreviewText() {
   // 5.1 校验预览内容
   if (!state.previewText) {
     setStatus("无内容", "warn");
+    showPreviewFeedback("没有可复制的字幕内容", "warn");
     logger.info("复制字幕文本完成: empty");
     return;
   }
 
-  // 5.2 写入剪贴板
-  await navigator.clipboard.writeText(state.previewText);
-  setStatus("已复制", "ok");
-  logger.info("复制字幕文本完成");
+  // 5.2 显示操作中状态，防止重复触发复制
+  nodes.copyButton.disabled = true;
+  nodes.copyButton.textContent = "复制中";
+  showPreviewFeedback("正在复制字幕", "busy");
+
+  try {
+    // 5.3 优先使用标准剪贴板，WebView 不支持时回退到页面复制
+    await writeTextToClipboard(state.previewText);
+    setStatus("已复制", "ok");
+    showPreviewFeedback("已复制到剪贴板", "ok");
+    logger.info("复制字幕文本完成");
+  } catch (error) {
+    setStatus("复制失败", "error");
+    showPreviewFeedback(`复制失败 · ${String(error?.message || error)}`, "error");
+    logger.error("复制字幕文本失败", error);
+  } finally {
+    // 5.4 不论成功失败都恢复复制入口
+    nodes.copyButton.disabled = false;
+    nodes.copyButton.textContent = "复制";
+  }
+}
+
+async function writeTextToClipboard(text) {
+  /*
+   * ================================================================================
+   * 步骤5.4.1：写入系统剪贴板
+   * ================================================================================
+   * 目标：
+   * 1) 优先使用浏览器标准 Clipboard API
+   * 2) 兼容部分 Android WebView 未开放 Clipboard API 的情况
+   */
+  logger.info("开始写入系统剪贴板...");
+
+  // 5.4.1.1 标准接口可用时直接写入，权限失败再走兼容路径
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(text);
+      logger.info("写入系统剪贴板完成: standard");
+      return;
+    } catch (error) {
+      logger.warn("标准剪贴板写入失败，尝试兼容路径", error);
+    }
+  }
+
+  // 5.4.1.2 用隐藏文本框触发兼容复制，不保留页面节点
+  const fallback = document.createElement("textarea");
+  fallback.value = String(text || "");
+  fallback.setAttribute("readonly", "");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  fallback.style.pointerEvents = "none";
+  document.body.appendChild(fallback);
+  let copied = false;
+  try {
+    fallback.select();
+    copied = document.execCommand("copy");
+  } finally {
+    fallback.remove();
+  }
+  if (!copied) throw new Error("系统未允许写入剪贴板");
+
+  logger.info("写入系统剪贴板完成: fallback");
 }
 
 async function downloadSubtitle() {
@@ -1100,8 +1165,14 @@ async function downloadSubtitle() {
   logger.info("开始下载字幕文件...");
 
   // 5.1 校验下载地址
+  if (state.downloadSaving) {
+    showPreviewFeedback("正在保存字幕", "busy");
+    logger.info("下载字幕文件完成: already saving");
+    return;
+  }
   if (!state.downloadUrl || nodes.downloadButton.getAttribute("aria-disabled") === "true") {
     setStatus("无文件", "warn");
+    showPreviewFeedback("没有可下载的字幕", "warn");
     logger.info("下载字幕文件完成: empty");
     return;
   }
@@ -1113,12 +1184,16 @@ async function downloadSubtitle() {
   if (window.subtitleFinder && window.subtitleFinder.saveSubtitle) {
     if (!state.downloadDir) {
       setStatus("先选位置", "warn");
+      showPreviewFeedback("请先选择存放位置", "warn");
       logger.info("下载字幕文件完成: 未选择保存位置");
       return;
     }
 
     try {
+      state.downloadSaving = true;
+      setDownloadButtonSaving(true);
       setStatus("保存中", "busy");
+      showPreviewFeedback("正在保存字幕", "busy");
       const result = await window.subtitleFinder.saveSubtitle({
         downloadUrl: absoluteUrl,
         fileName: state.downloadFileName || "subtitle.srt",
@@ -1126,24 +1201,38 @@ async function downloadSubtitle() {
         preferredBaseName,
       });
       if (result && result.error) throw new Error(result.error);
-      setStatus(result && result.saved ? "已保存" : "已取消", result && result.saved ? "ok" : "warn");
+      const saved = Boolean(result && result.saved);
+      const fileName = result?.fileName || buildPreferredDownloadFileName(state.downloadFileName || "subtitle.srt", preferredBaseName);
+      setStatus(saved ? "已保存" : "已取消", saved ? "ok" : "warn");
+      showPreviewFeedback(saved ? `已保存 · ${fileName}` : "已取消保存", saved ? "ok" : "warn", result?.filePath || "");
       logger.info("下载字幕文件完成: desktop");
     } catch (error) {
       setStatus("失败", "error");
       nodes.resultSummary.textContent = String(error.message || error);
+      showPreviewFeedback(`保存失败 · ${String(error.message || error)}`, "error");
       logger.error("下载字幕文件失败", error);
+    } finally {
+      state.downloadSaving = false;
+      setDownloadButtonSaving(false);
     }
     return;
   }
 
   // 5.3 浏览器版使用普通下载链接
+  state.downloadSaving = true;
+  setDownloadButtonSaving(true);
+  showPreviewFeedback("正在开始下载", "busy");
   const link = document.createElement("a");
   link.href = absoluteUrl;
-  link.download = buildPreferredDownloadFileName(state.downloadFileName || "subtitle.srt", preferredBaseName);
+  const fileName = buildPreferredDownloadFileName(state.downloadFileName || "subtitle.srt", preferredBaseName);
+  link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  state.downloadSaving = false;
+  setDownloadButtonSaving(false);
   setStatus("已下载", "ok");
+  showPreviewFeedback(`已开始下载 · ${fileName}`, "ok");
   logger.info("下载字幕文件完成: browser");
 }
 
@@ -2682,6 +2771,8 @@ function clearPreview() {
   state.previewText = "";
   state.downloadUrl = "";
   state.downloadFileName = "";
+  state.downloadSaving = false;
+  clearPreviewFeedback();
   closeMobilePreview();
   if (state.previewController) {
     state.previewController.abort();
@@ -2689,7 +2780,7 @@ function clearPreview() {
   }
   nodes.previewMeta.textContent = "未选择字幕";
   nodes.previewText.textContent = "点击左侧结果查看字幕内容。";
-  nodes.downloadButton.setAttribute("aria-disabled", "true");
+  setDownloadButtonAvailable(false);
   renderSubtitleSyncState();
 }
 
@@ -2714,7 +2805,7 @@ function openMobilePreview() {
    * ================================================================================
    * 目标：
    * 1) 在手机上把预览直接铺到当前视口
-   * 2) 不改变结果区位置，不要求手动滚动
+   * 2) 保留页面滚动，让用户随时回到搜索栏修改条件
    */
   logger.info("开始打开移动端预览层...");
 
@@ -2746,6 +2837,75 @@ function setStatus(text, tone) {
   // 2.6 更新状态徽标
   nodes.statusBadge.textContent = text;
   nodes.statusBadge.dataset.tone = tone;
+}
+
+function setDownloadButtonAvailable(available) {
+  /*
+   * ================================================================================
+   * 步骤10：控制下载按钮可用状态
+   * ================================================================================
+   * 目标：
+   * 1) 预览未完成或无文件时阻止下载
+   * 2) 保存结束后恢复当前字幕的下载入口
+   */
+  logger.info("开始更新下载按钮可用状态...");
+
+  // 10.1 统一同步可访问性标记、原生禁用状态和按钮文案
+  const enabled = Boolean(available) && !state.downloadSaving;
+  nodes.downloadButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+  nodes.downloadButton.disabled = !enabled;
+  nodes.downloadButton.textContent = enabled ? "下载" : state.downloadSaving ? "保存中" : "下载";
+
+  logger.info("更新下载按钮可用状态完成", enabled ? "enabled" : "disabled");
+}
+
+function setDownloadButtonSaving(saving) {
+  /*
+   * ================================================================================
+   * 步骤11：切换字幕保存中状态
+   * ================================================================================
+   * 目标：
+   * 1) 保存期间阻止重复创建同一字幕文件
+   * 2) 用按钮文案反馈当前点击已经被接收
+   */
+  logger.info("开始切换字幕保存中状态...");
+
+  // 11.1 仅在当前可下载字幕上展示保存中，避免错误恢复失效按钮
+  state.downloadSaving = Boolean(saving);
+  const available = Boolean(state.downloadUrl) && nodes.downloadButton.getAttribute("aria-disabled") !== "true";
+  nodes.downloadButton.disabled = state.downloadSaving || !available;
+  nodes.downloadButton.textContent = state.downloadSaving ? "保存中" : "下载";
+
+  logger.info("切换字幕保存中状态完成", state.downloadSaving ? "saving" : "idle");
+}
+
+function showPreviewFeedback(message, tone = "ok", title = "") {
+  /*
+   * ================================================================================
+   * 步骤12：显示预览操作反馈
+   * ================================================================================
+   * 目标：
+   * 1) 在手机预览层内直接显示复制、保存进度和结果
+   * 2) 成功时保留文件名，失败时显示可处理的原因
+   */
+  logger.info("开始显示预览操作反馈...");
+
+  // 12.1 写入可读文本和完整名称提示，并显示实时通知区域
+  const text = String(message || "").trim();
+  nodes.previewFeedback.hidden = !text;
+  nodes.previewFeedback.textContent = text;
+  nodes.previewFeedback.dataset.tone = tone;
+  nodes.previewFeedback.title = String(title || text);
+
+  logger.info("显示预览操作反馈完成", tone);
+}
+
+function clearPreviewFeedback() {
+  // 12.2 切换字幕或关闭预览时清空上一条保存结果
+  nodes.previewFeedback.hidden = true;
+  nodes.previewFeedback.textContent = "";
+  nodes.previewFeedback.title = "";
+  delete nodes.previewFeedback.dataset.tone;
 }
 
 function escapeHtml(value) {

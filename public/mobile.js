@@ -137,7 +137,7 @@
         targetDirectory,
         fileName,
         base64,
-        mimeType: response.headers.get("content-type") || "application/octet-stream",
+        mimeType: resolveMobileSubtitleMimeType(fileName),
       });
 
       logger.info("保存移动端字幕完成", (result && result.fileName) || (result && result.filePath) || "unknown");
@@ -293,6 +293,29 @@
 
     logger.info("清理移动端文件名完成", safe || "subtitle.srt");
     return safe || "subtitle.srt";
+  }
+
+  function resolveMobileSubtitleMimeType(fileName) {
+    /*
+     * ================================================================================
+     * 步骤6.1：按字幕后缀固定保存类型
+     * ================================================================================
+     * 目标：
+     * 1) 不把 SRT 交给 Android 文件提供器当作普通 TXT
+     * 2) 让系统保存时保留字幕文件原本的扩展名
+     */
+    logger.info("开始识别移动端字幕保存类型...");
+
+    // 6.1.1 由最终文件名决定 MIME，不能信任来源站点的 text/plain 响应头
+    const extensionMatch = String(fileName || "").toLowerCase().match(/(\.[^.]+)$/);
+    const extension = extensionMatch ? extensionMatch[1] : "";
+    let mimeType = "application/octet-stream";
+    if (extension === ".srt") mimeType = "application/x-subrip";
+    else if (extension === ".ass" || extension === ".ssa") mimeType = "text/x-ssa";
+    else if (extension === ".vtt") mimeType = "text/vtt";
+
+    logger.info("识别移动端字幕保存类型完成", mimeType);
+    return mimeType;
   }
 
   function buildPreferredMobileFileName(sourceFileName, preferredBaseName) {

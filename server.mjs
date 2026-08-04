@@ -3903,9 +3903,10 @@ async function getSevenZipWasmBinary() {
 function getSubtitleContentType(fileName) {
   // 12.10 按字幕扩展名返回下载类型
   const extension = path.extname(fileName || "").toLowerCase();
+  if (extension === ".srt") return "application/x-subrip; charset=utf-8";
   if (extension === ".vtt") return "text/vtt; charset=utf-8";
   if (extension === ".ass" || extension === ".ssa") return "text/x-ssa; charset=utf-8";
-  return "text/plain; charset=utf-8";
+  return "application/octet-stream";
 }
 
 function cacheResult(result) {

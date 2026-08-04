@@ -863,6 +863,40 @@ tbody tr.is-active {
   white-space: nowrap;
 }
 
+.preview-feedback {
+  min-height: 34px;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  padding: 8px 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-feedback[hidden] {
+  display: none;
+}
+
+.preview-feedback[data-tone="busy"] {
+  background: rgba(194, 130, 18, 0.12);
+  color: #744b08;
+}
+
+.preview-feedback[data-tone="ok"] {
+  background: rgba(37, 107, 74, 0.1);
+  color: var(--accent-dark);
+}
+
+.preview-feedback[data-tone="warn"],
+.preview-feedback[data-tone="error"] {
+  background: rgba(173, 59, 47, 0.1);
+  color: var(--red);
+}
+
 .preview-pane .pane-header > div:first-child {
   min-width: 0;
 }
@@ -1123,22 +1157,11 @@ tbody tr.is-active {
     order: 3;
   }
 
-  body.preview-open {
-    overflow: hidden;
-  }
-
-  body.preview-open .search-rail {
-    display: none;
-  }
-
   body.preview-open .results-pane {
     display: flex;
-    position: fixed;
-    inset: 8px 8px auto;
-    z-index: 19;
-    height: calc(52vh - 12px);
-    overflow: hidden;
-    padding-bottom: 0;
+    position: relative;
+    min-height: 0;
+    padding-bottom: calc(48vh + 18px);
   }
 
   body.preview-open .preview-pane {
@@ -1146,6 +1169,7 @@ tbody tr.is-active {
     position: fixed;
     inset: auto 8px 8px;
     height: calc(48vh - 12px);
+    height: calc(48dvh - 12px);
     z-index: 20;
     margin: 0;
     overflow: hidden;

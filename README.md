@@ -2,15 +2,15 @@
 
 面向 Windows 和 Android 的本地字幕检索与管理工具。可按片名、季集号或本地视频文件查找字幕，预览后保存到自己选择的位置。
 
-当前版本：`1.1.6`。本项目采用 PolyForm Noncommercial License 1.0.0 授权，源码公开可获取，仅限非商业使用。
+当前版本：`1.6.1`。本项目采用 PolyForm Noncommercial License 1.0.0 授权，源码公开可获取，仅限非商业使用。
 
 ## 下载
 
 只从 [GitHub Releases](https://github.com/daoran9/subtitle-finder/releases) 获取正式发布包。
 
-- Windows 安装包：`SubtitleFinder.Setup.1.1.6.exe`，适合长期使用。
-- Windows 便携包：`SubtitleFinder.1.1.6.exe`，放到可写目录后直接运行。
-- Android 安装包：`SubtitleFinder.Android.1.1.6.apk`，适用于 Android 5.1 及以上的常见 ARM 手机。
+- Windows 安装包：`SubtitleFinder Setup 1.6.1.exe`，适合长期使用。
+- Windows 便携包：`SubtitleFinder 1.6.1.exe`，放到可写目录后直接运行。
+- Android 安装包：`SubtitleFinder Android 1.6.1.apk`，适用于 Android 5.1 及以上的常见 ARM 手机。
 
 Windows 程序暂未使用代码签名证书，首次运行可能显示未知发布者。请确认下载来源是本仓库 Releases 页面。
 

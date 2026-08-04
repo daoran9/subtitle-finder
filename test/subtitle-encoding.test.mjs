@@ -31,7 +31,16 @@ test("GB18030 字幕可解码并保存为 UTF-8", () => {
   assert.equal(decoded.encoding, "gb18030");
   assert.match(decoded.text, /你好/);
   assert.match(payload.buffer.toString("utf8"), /你好/);
-  assert.match(payload.contentType, /charset=utf-8/i);
+  assert.equal(payload.contentType, "application/x-subrip; charset=utf-8");
+});
+
+// 1.1.1 下载响应必须按字幕格式返回，不能把 SRT 标成普通文本
+test("字幕下载类型保留文件后缀语义", () => {
+  const decoded = { text: `${SRT_PREFIX}Subtitle\r\n` };
+
+  assert.equal(normalizeSubtitlePayload({ fileName: "Daria.ass" }, decoded).contentType, "text/x-ssa; charset=utf-8");
+  assert.equal(normalizeSubtitlePayload({ fileName: "Daria.vtt" }, decoded).contentType, "text/vtt; charset=utf-8");
+  assert.equal(normalizeSubtitlePayload({ fileName: "Daria.sub" }, decoded).contentType, "application/octet-stream");
 });
 
 // 1.2 带 BOM 的 UTF-16LE 不能被 UTF-8 和 NUL 清理逻辑误判

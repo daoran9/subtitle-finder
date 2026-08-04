@@ -269,7 +269,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
             if (treeUriText.length() == 0) treeUriText = call.getString("downloadDir", "");
             String base64Text = call.getString("base64", "");
             String fileName = sanitizeFileName(call.getString("fileName", "subtitle.srt"));
-            String mimeType = normalizeMimeType(call.getString("mimeType", "application/octet-stream"));
+            String mimeType = resolveSubtitleMimeType(fileName, call.getString("mimeType", "application/octet-stream"));
             if (treeUriText.length() == 0) {
                 resolveSaveError(call, "请先选择存放位置");
                 logger.info("写入字幕文件完成: missing directory");
@@ -291,7 +291,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
 
             // 3.4 创建不重名文件并写入字节
             String targetName = resolveAvailableFileName(directory, fileName);
-            DocumentFile targetFile = directory.createFile(mimeType, targetName);
+            DocumentFile targetFile = createExactSubtitleFile(directory, targetName, mimeType);
             if (targetFile == null || targetFile.getUri() == null) {
                 resolveSaveError(call, "创建字幕文件失败");
                 logger.info("写入字幕文件完成: create failed");
@@ -311,10 +311,10 @@ public class SubtitleFinderNativePlugin extends Plugin {
             // 3.5 返回保存结果
             JSObject response = new JSObject();
             response.put("saved", true);
-            response.put("fileName", targetName);
+            response.put("fileName", targetFile.getName() == null ? targetName : targetFile.getName());
             response.put("filePath", targetFile.getUri().toString());
             call.resolve(response);
-            logger.info("写入字幕文件完成: " + targetName);
+            logger.info("写入字幕文件完成: " + (targetFile.getName() == null ? targetName : targetFile.getName()));
         } catch (Exception error) {
             resolveSaveError(call, "保存失败: " + error.getMessage());
             logger.error("写入字幕文件失败", error);
@@ -953,6 +953,73 @@ public class SubtitleFinderNativePlugin extends Plugin {
         if (mimeType == null) return "application/octet-stream";
         String normalized = mimeType.split(";", 2)[0].trim();
         return normalized.length() == 0 ? "application/octet-stream" : normalized;
+    }
+
+    private String resolveSubtitleMimeType(String fileName, String requestedMimeType) {
+        /*
+         * ============================================================================
+         * 步骤6.9.1：固定 Android 字幕保存类型
+         * ============================================================================
+         * 目标：
+         * 1) 用字幕扩展名覆盖来源站点常见的 text/plain 类型
+         * 2) 防止 Android 文件提供器把 .srt 自动补成 .txt
+         */
+        logger.info("开始识别 Android 字幕保存类型...");
+
+        // 6.9.1.1 优先按最终文件名返回与字幕格式匹配的 MIME 类型
+        String extension = getExtension(fileName).toLowerCase(Locale.ROOT);
+        String mimeType;
+        if (".srt".equals(extension)) mimeType = "application/x-subrip";
+        else if (".ass".equals(extension) || ".ssa".equals(extension)) mimeType = "text/x-ssa";
+        else if (".vtt".equals(extension)) mimeType = "text/vtt";
+        else if (".sub".equals(extension)) mimeType = "application/octet-stream";
+        else {
+            String normalized = normalizeMimeType(requestedMimeType);
+            mimeType = "text/plain".equals(normalized) ? "application/octet-stream" : normalized;
+        }
+
+        logger.info("识别 Android 字幕保存类型完成: " + mimeType);
+        return mimeType;
+    }
+
+    private DocumentFile createExactSubtitleFile(DocumentFile directory, String targetName, String mimeType) {
+        /*
+         * ============================================================================
+         * 步骤6.9.2：创建保留后缀的字幕文件
+         * ============================================================================
+         * 目标：
+         * 1) 检查 Android 文件提供器是否篡改目标文件扩展名
+         * 2) 在必要时改名或改用通用 MIME 类型重建文件
+         */
+        logger.info("开始创建保留后缀的字幕文件...");
+
+        // 6.9.2.1 先用准确字幕 MIME 类型创建文件
+        DocumentFile targetFile = directory.createFile(mimeType, targetName);
+        if (targetFile == null || targetName.equals(targetFile.getName())) {
+            logger.info("创建保留后缀的字幕文件完成: " + targetName);
+            return targetFile;
+        }
+
+        // 6.9.2.2 个别文件提供器仍会追加 .txt，先尝试直接改回目标名
+        if (targetFile.renameTo(targetName) && targetName.equals(targetFile.getName())) {
+            logger.info("创建保留后缀的字幕文件完成: renamed");
+            return targetFile;
+        }
+
+        // 6.9.2.3 改名失败时删除未写入的错误文件，再用通用类型重建
+        if (!targetFile.delete()) {
+            logger.info("创建保留后缀的字幕文件完成: remove invalid failed");
+            return null;
+        }
+        DocumentFile fallbackFile = directory.createFile("application/octet-stream", targetName);
+        if (fallbackFile == null || !targetName.equals(fallbackFile.getName())) {
+            if (fallbackFile != null) fallbackFile.delete();
+            logger.info("创建保留后缀的字幕文件完成: suffix changed");
+            return null;
+        }
+
+        logger.info("创建保留后缀的字幕文件完成: fallback");
+        return fallbackFile;
     }
 
     private String resolveDirectoryLabel(DocumentFile directory, String fallback) {
