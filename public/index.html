@@ -19,7 +19,7 @@
             <div class="brand-mark" aria-hidden="true">S</div>
             <div>
               <h1>字幕检索台</h1>
-              <p>建议精准搜索 · v1.6.1</p>
+              <p>建议精准搜索 · v1.7.0</p>
             </div>
           </div>
 
@@ -94,6 +94,7 @@
               <div class="section-actions">
                 <button id="selectVideoButton" type="button">单个</button>
                 <button id="scanVideoButton" type="button">文件夹</button>
+                <button id="drive115Button" type="button">115</button>
               </div>
             </div>
             <div id="videoScanMeta" class="video-scan-meta" hidden>
@@ -199,6 +200,7 @@
               <button id="syncButton" type="button" title="按当前本地视频自动校时" hidden disabled>校时</button>
               <button id="cancelSyncButton" type="button" title="取消自动校时" hidden>取消</button>
               <button id="downloadButton" type="button" class="download-link" aria-disabled="true" title="下载到已选位置">下载</button>
+              <button id="save115Button" type="button" disabled>存到 115</button>
             </div>
           </header>
 
@@ -208,18 +210,50 @@
           </div>
 
           <div id="previewFeedback" class="preview-feedback" role="status" aria-live="polite" hidden></div>
+          <div id="drive115Target" class="drive115-target" hidden>
+            <div class="drive115-destination"><span id="drive115TargetPath"></span><strong id="drive115TargetName"></strong></div>
+            <button id="drive115Clear" type="button">取消 115 目标</button>
+          </div>
 
           <pre id="previewText" class="preview-text">点击左侧结果查看字幕内容。</pre>
         </section>
       </section>
     </main>
 
+    <div id="drive115Modal" class="modal-backdrop" hidden>
+      <section class="about-dialog drive115-dialog" role="dialog" aria-modal="true" aria-labelledby="drive115Title" tabindex="-1">
+        <header class="about-header">
+          <div><h2 id="drive115Title">115 视频与字幕</h2><p id="drive115Account">未登录</p></div>
+          <button id="close115Button" type="button" class="ghost-icon-button" aria-label="关闭 115">×</button>
+        </header>
+        <div class="about-body drive115-body">
+          <div id="drive115LoginPanel">
+            <label>登录端 <select id="drive115App" aria-label="115 登录端"></select></label>
+            <button id="drive115Login" type="button">生成二维码</button>
+            <p class="muted">同一登录端可能影响该端已有登录；账号仅在本次运行有效。</p>
+            <p class="muted">扫码确认页可能显示“iPhone 网页端”等名称；登录成功后会核对并显示实际登录端。</p>
+            <img id="drive115Qr" width="220" height="220" alt="115 登录二维码" hidden />
+          </div>
+          <p id="drive115Message" role="status" aria-live="polite"></p>
+          <div id="drive115Browser" hidden>
+            <nav id="drive115Path" class="drive115-path" aria-label="115 目录"></nav>
+            <div id="drive115Files" class="drive115-files" aria-label="115 文件列表"></div>
+            <div class="drive115-pagination">
+              <button id="drive115Previous" type="button" disabled>上一页</button><span id="drive115Page"></span>
+              <button id="drive115Next" type="button" disabled>下一页</button><button id="drive115Refresh" type="button">刷新</button>
+            </div>
+          </div>
+          <button id="drive115Logout" type="button" hidden>退出 115</button>
+        </div>
+      </section>
+    </div>
+
     <div id="aboutModal" class="modal-backdrop" hidden>
       <section class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="aboutTitle" tabindex="-1">
         <header class="about-header">
           <div>
             <h2 id="aboutTitle">关于</h2>
-            <p>SubtitleFinder · v1.6.1</p>
+            <p>SubtitleFinder · v1.7.0</p>
           </div>
           <button
             id="closeAboutButton"
@@ -252,13 +286,12 @@
         <header class="about-header">
           <div>
             <h2 id="settingsTitle">设置</h2>
-            <p id="settingsPlatformLabel">扫描与转换</p>
+            <p id="settingsPlatformLabel">扫描、转换与保存</p>
           </div>
           <button
             id="closeSettingsButton"
             type="button"
             class="ghost-icon-button"
-            data-settings-close="true"
             aria-label="关闭设置"
             title="关闭设置"
           >
@@ -267,6 +300,10 @@
         </header>
 
         <div class="about-body settings-body">
+          <label class="toggle-row">
+            <span>按视频名保存字幕</span>
+            <input id="matchVideoName" type="checkbox" role="switch" checked />
+          </label>
           <label class="settings-field" for="scanExclusionRulesInput">
             <span>扫描排除规则</span>
             <textarea id="scanExclusionRulesInput" rows="4" spellcheck="false" placeholder="**/Extras/**&#10;*.sample.*"></textarea>

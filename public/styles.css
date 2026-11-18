@@ -525,8 +525,18 @@ button:disabled {
 
 .results-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
+}
+
+.results-pane .pane-header {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.results-actions button {
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -566,7 +576,10 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 8px;
-  overflow: hidden;
+  flex-shrink: 0;
+  max-height: 35%;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-bottom: 1px solid var(--line);
   background: #fbfcfa;
   padding: 8px 10px;
@@ -602,6 +615,8 @@ button:disabled {
   grid-column: 1 / -1;
   color: var(--muted);
   font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .source-stat[data-status="busy"] b {
@@ -799,6 +814,7 @@ tbody tr.is-active {
 .preview-actions {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -909,6 +925,7 @@ tbody tr.is-active {
 
 .conversion-control {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
   min-height: 34px;
@@ -919,6 +936,7 @@ tbody tr.is-active {
   font-size: 12px;
   font-weight: 700;
   padding: 0 5px 0 9px;
+  white-space: nowrap;
 }
 
 .conversion-control select {
@@ -958,6 +976,19 @@ tbody tr.is-active {
 .modal-backdrop[hidden] {
   display: none;
 }
+
+.drive115-dialog { width: min(660px, 100%); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); display: flex; flex-direction: column; }
+.drive115-body { overflow-y: auto; min-height: 0; }
+.drive115-body select { max-width: 100%; margin-bottom: 8px; }
+#drive115Qr { display: block; max-width: 100%; object-fit: contain; margin: 12px auto; background: white; }
+.drive115-path, .drive115-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.drive115-files { display: grid; gap: 5px; max-height: 40vh; overflow-y: auto; }
+.drive115-files .drive115-file { text-align: left; overflow-wrap: anywhere; width: 100%; }
+.drive115-target { flex: 0 0 auto; padding: 8px 12px; background: var(--panel-strong); color: var(--accent-dark); font-size: 12px; }
+.drive115-destination { display: flex; gap: 6px; }
+.drive115-destination > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drive115-destination span { max-width: 45%; }
+.drive115-target button { margin-top: 4px; min-height: 32px; font-size: 12px; }
 
 .about-dialog {
   width: min(560px, 100%);
@@ -1161,15 +1192,16 @@ tbody tr.is-active {
     display: flex;
     position: relative;
     min-height: 0;
-    padding-bottom: calc(48vh + 18px);
+    padding-bottom: calc(70vh + 18px);
+    padding-bottom: calc(70dvh + 18px);
   }
 
   body.preview-open .preview-pane {
     display: flex;
     position: fixed;
     inset: auto 8px 8px;
-    height: calc(48vh - 12px);
-    height: calc(48dvh - 12px);
+    height: 70vh;
+    height: 70dvh;
     z-index: 20;
     margin: 0;
     overflow: hidden;
@@ -1435,7 +1467,9 @@ tbody tr.is-active {
   .source-stats {
     display: flex;
     gap: 6px;
+    max-height: none;
     overflow-x: auto;
+    overflow-y: hidden;
     padding: 7px 8px;
   }
 
@@ -1488,8 +1522,19 @@ tbody tr.is-active {
 
   .preview-actions {
     display: grid;
-    grid-template-columns: 32px minmax(88px, 1fr) repeat(3, minmax(40px, auto));
+    grid-template-columns: 32px minmax(88px, 1fr) repeat(2, minmax(40px, auto));
+    grid-template-areas:
+      "close convert copy directory"
+      "sync sync download cloud";
   }
+
+  #closePreviewButton { grid-area: close; }
+  .conversion-control { grid-area: convert; }
+  #copyButton { grid-area: copy; }
+  #chooseDirButton { grid-area: directory; }
+  #syncButton, #cancelSyncButton { grid-area: sync; }
+  #downloadButton { grid-area: download; }
+  #save115Button { grid-area: cloud; }
 
   .preview-actions button {
     min-width: 0;
@@ -1501,19 +1546,5 @@ tbody tr.is-active {
     min-width: 0;
     padding-left: 7px;
     justify-content: center;
-  }
-}
-
-@media (max-width: 340px) {
-  .preview-actions {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  #closePreviewButton {
-    grid-column: 1;
-  }
-
-  .conversion-control {
-    grid-column: 2 / 4;
   }
 }

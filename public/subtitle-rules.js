@@ -1,3 +1,5 @@
+import { extractAvIdentity, sameAvIdentity } from "./av-identity.js";
+
 const SOURCE_QUALITY_WEIGHT = {
   shooter: 18,
   "thunder-fingerprint": 18,
@@ -64,22 +66,38 @@ export function analyzeSubtitleLanguage(value) {
  * 步骤2：计算字幕结果质量分
  * ================================================================================
  * 目标：
- * 1) 综合语言、季集号、发布版本、格式、来源和站点评分
- * 2) 输出统一的 0-100 分，避免直接比较各站含义不同的原始分数
+ * 1) 番号模式先核对身份，再综合语言、版本、格式和来源
+ * 2) 输出统一的 0-100 分，避免错误番号靠来源分排在前面
  */
 export function scoreSubtitleCandidate(result, context = {}) {
   logger.info("开始计算字幕结果质量分...");
 
   // 2.1 读取结果和检索上下文
-  const text = [result?.title, result?.fileName, result?.extra, result?.language].filter(Boolean).join(" ");
+  const text = [result?.catalogCode, result?.title, result?.fileName, result?.extra, result?.language].filter(Boolean).join(" ");
   const language = String(context.language || "zh-CN");
   const languageProfile = analyzeSubtitleLanguage(text);
   const requestedEpisode = context.requestedEpisode || extractEpisodeToken(context.query || "");
+  const catalogIdentity = context.catalogIdentity || extractAvIdentity(context.catalogCode || context.query || "");
+  const candidateIdentity = extractAvIdentity(text, { allowLooseCode: Boolean(catalogIdentity) });
   const resultEpisode = extractEpisodeToken(text);
   const queryReleaseTokens = extractReleaseTokens(context.releaseName || context.query || "");
   const resultReleaseTokens = extractReleaseTokens(text);
   let score = 28;
   const reasons = [];
+
+  // 2.1.1 番号身份是 AV 模式的硬排序条件，错误号码不能被语言或下载量抵消。
+  if (catalogIdentity) {
+    if (result?.fingerprintMatch) {
+      score += 80;
+      reasons.push("指纹匹配");
+    } else if (candidateIdentity && sameAvIdentity(candidateIdentity, catalogIdentity)) {
+      score += 65;
+      reasons.push("番号匹配");
+    } else if (candidateIdentity) {
+      score -= 100;
+      reasons.push("番号不符");
+    }
+  }
 
   // 2.2 评价目标语言
   if (language === "zh-CN") {
@@ -116,8 +134,8 @@ export function scoreSubtitleCandidate(result, context = {}) {
     reasons.push("双语");
   }
 
-  // 2.2.1 视频字节指纹命中优先于文件名相似度
-  if (result?.fingerprintMatch) {
+  // 2.2.1 非番号搜索仍保留原有指纹加分。
+  if (result?.fingerprintMatch && !catalogIdentity) {
     score += 24;
     reasons.push("指纹匹配");
   }
@@ -155,6 +173,16 @@ export function scoreSubtitleCandidate(result, context = {}) {
     reasons.push("文件名异常");
   }
 
+  // 2.4.1 同番号时用时长接近度辅助排序，缺失时长不扣分。
+  const videoDurationMs = Number(context.videoDurationMs || 0);
+  const candidateDurationMs = parseDurationMs(result?.durationMs || result?.duration);
+  const durationDeltaMs = videoDurationMs > 0 && candidateDurationMs > 0
+    ? Math.abs(videoDurationMs - candidateDurationMs)
+    : 0;
+  if (catalogIdentity && durationDeltaMs > 0) {
+    score += Math.max(0, 12 - Math.round(durationDeltaMs / 60000));
+  }
+
   // 2.5 生成稳定排序字段
   const qualityScore = clamp(Math.round(score), 0, 100);
   const resultValue = {
@@ -162,6 +190,9 @@ export function scoreSubtitleCandidate(result, context = {}) {
     qualityReasons: reasons,
     languageProfile,
     releaseMatchCount: releaseMatches.length,
+    catalogCode: candidateIdentity?.canonicalCode || "",
+    catalogMatch: Boolean(catalogIdentity && candidateIdentity && sameAvIdentity(candidateIdentity, catalogIdentity)),
+    durationDeltaMs,
   };
 
   logger.info("计算字幕结果质量分完成", qualityScore);
@@ -174,7 +205,7 @@ export function scoreSubtitleCandidate(result, context = {}) {
  * ================================================================================
  * 目标：
  * 1) 从 ZIP 或 RAR 的多个文件中选出目标语言和目标集数
- * 2) 排除样片、隐藏文件、说明文件和明显错误集数
+ * 2) 番号包先排除明确错误号码，再比较语言和发布版本
  */
 export function scoreArchiveSubtitle(fileName, context = {}) {
   logger.info("开始计算压缩包字幕文件分...");
@@ -185,10 +216,19 @@ export function scoreArchiveSubtitle(fileName, context = {}) {
   const extension = getExtension(lower);
   const languageProfile = analyzeSubtitleLanguage(text);
   const requestedEpisode = context.requestedEpisode || extractEpisodeToken(context.query || context.releaseName || "");
+  const catalogIdentity = context.catalogIdentity || extractAvIdentity(context.catalogCode || context.query || "");
+  const fileIdentity = extractAvIdentity(text, { allowLooseCode: Boolean(catalogIdentity) });
   const fileEpisode = extractEpisodeToken(text);
   const requestedRelease = extractReleaseTokens(context.releaseName || context.query || "");
   const fileRelease = extractReleaseTokens(text);
   let score = 0;
+
+  // 3.1.1 包内文件明确带有其他番号时，禁止被语言分选中。
+  if (catalogIdentity && fileIdentity && !sameAvIdentity(fileIdentity, catalogIdentity)) {
+    logger.info("计算压缩包字幕文件分完成: 番号不符");
+    return Number.NEGATIVE_INFINITY;
+  }
+  if (catalogIdentity && fileIdentity && sameAvIdentity(fileIdentity, catalogIdentity)) score += 100;
 
   // 3.2 评价文件类型和目录噪声
   if (extension === ".ass" || extension === ".ssa") score += 14;
@@ -304,6 +344,13 @@ function getExtension(value) {
   const fileName = getFileName(value);
   const index = fileName.lastIndexOf(".");
   return index > 0 ? fileName.slice(index).toLowerCase() : "";
+}
+
+function parseDurationMs(value) {
+  if (Number.isFinite(Number(value)) && Number(value) > 0) return Number(value);
+  const match = String(value || "").match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  return (Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3])) * 1000;
 }
 
 function stripExtension(value) {

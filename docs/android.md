@@ -1,12 +1,13 @@
 # Android 版构建说明
 
-Android 版基于 Capacitor 3 和 `capacitor-nodejs`。前端仍使用 `public/`，服务端由 `scripts/sync-mobile-nodejs.mjs` 打包成 Node 12.19 可运行的 `server.cjs`。
+Android 版基于 Capacitor 3 和 `capacitor-nodejs`。前端仍使用 `public/`，服务端由 `scripts/sync-mobile-nodejs.mjs` 打包成 Node 12.19 可运行的 `server-alt.cjs`。
 
 ## 本机依赖
 
 - JDK 11：建议放在非 C 盘目录，例如 `E:\Java\jdk-11`
 - Android SDK：建议放在非 C 盘目录，例如 `E:\Android\Sdk`
 - Gradle 缓存：建议放在仓库内的 `.gradle-cache`
+- Wrapper 固定为 Gradle 7.0 `bin` 发行包，并验证官方 SHA-256。与同版本 `all` 包使用相同构建运行时，仅省去文档和源码下载。
 
 本项目不要求把 SDK 或 Gradle 缓存放到 C 盘。
 

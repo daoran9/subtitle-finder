@@ -1,3 +1,5 @@
+import { extractAvIdentity, sameAvIdentity } from "./av-identity.js";
+
 export const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"]);
 export const SUBTITLE_EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt", ".sub"]);
 
@@ -28,8 +30,8 @@ const logger = {
  * 步骤1：解析媒体文件名
  * ================================================================================
  * 目标：
- * 1) 从文件名和父目录识别片名、年份、季号、集号
- * 2) 生成适合字幕站检索的稳定搜索词
+ * 1) 从文件名和父目录识别番号、片名、年份、季号、集号
+ * 2) 番号优先生成稳定搜索词，其他媒体保留原有解析
  * 3) 保留视频原始主文件名，供字幕下载时同名保存
  */
 export function analyzeMediaFile(fileName, options = {}) {
@@ -42,12 +44,15 @@ export function analyzeMediaFile(fileName, options = {}) {
   const readableStem = normalizeSeparators(rawStem);
   const parentNames = Array.isArray(options.parentNames) ? options.parentNames : [];
 
-  // 1.2 识别季集信息
+  // 1.2 先识别高置信番号，避免恢复文件被当成普通电影标题。
+  const avIdentity = extractAvIdentity(safeFileName);
+
+  // 1.3 没有番号时继续沿用电影和剧集解析。
   const episodeInfo = extractEpisodeInfo(readableStem, parentNames);
   const parentTitle = selectParentTitle(parentNames);
   const year = extractYear(readableStem) || extractYear(parentTitle);
 
-  // 1.3 选择并清理标题
+  // 1.4 选择并清理标题
   const titleSource = episodeInfo
     ? readableStem.slice(0, episodeInfo.index).trim() || parentTitle
     : readableStem;
@@ -57,14 +62,15 @@ export function analyzeMediaFile(fileName, options = {}) {
     title = cleanTitle(parentTitle, year) || cleanTitle(fileTitleFallback, year) || (episodeInfo ? "" : rawStem);
   }
 
-  // 1.4 生成统一搜索词和匹配键
+  // 1.5 生成统一搜索词和匹配键
   const episodeTag = episodeInfo ? formatEpisodeTag(episodeInfo.season, episodeInfo.episode, episodeInfo.episodeEnd) : "";
   const queryParts = [title];
   if (!episodeInfo && year) queryParts.push(year);
   if (episodeTag) queryParts.push(episodeTag);
-  const query = queryParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim() || episodeTag || rawStem;
-  const mediaType = episodeInfo ? "episode" : "movie";
-  const mediaKey = buildMediaKey({ title, year, ...episodeInfo, mediaType });
+  const genericQuery = queryParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim() || episodeTag || rawStem;
+  const query = avIdentity?.canonicalCode || genericQuery;
+  const mediaType = avIdentity ? "av" : episodeInfo ? "episode" : "movie";
+  const mediaKey = avIdentity ? `av:${avIdentity.compactCode}` : buildMediaKey({ title, year, ...episodeInfo, mediaType });
 
   const result = {
     mediaType,
@@ -76,6 +82,11 @@ export function analyzeMediaFile(fileName, options = {}) {
     query,
     mediaKey,
     subtitleBaseName: rawStem,
+    isAv: Boolean(avIdentity),
+    catalogCode: avIdentity?.canonicalCode || "",
+    catalogKey: avIdentity?.compactCode || "",
+    catalogVariants: avIdentity?.variants || [],
+    catalogReason: avIdentity?.reason || "",
   };
   const enriched = applyNfoMetadata(result, options.nfoMetadata);
   logger.info("解析媒体文件名完成", enriched.query);
@@ -100,7 +111,28 @@ export function applyNfoMetadata(media, metadata) {
     return media;
   }
 
-  // 1.5.2 电影使用片名，剧集优先使用系列名
+  // 1.5.2 番号身份不能被 NFO 标题覆盖，但仍保留 NFO 供界面显示。
+  if (media.isAv) {
+    const result = {
+      ...media,
+      nfoMetadata: {
+        mediaType: String(nfo.mediaType || ""),
+        title: cleanMetadataTitle(nfo.title),
+        originalTitle: cleanMetadataTitle(nfo.originalTitle),
+        showTitle: cleanMetadataTitle(nfo.showTitle),
+        year: normalizeMetadataYear(nfo.year),
+        season: normalizeMetadataNumber(nfo.season),
+        episode: normalizeMetadataNumber(nfo.episode),
+        imdbId: String(nfo.imdbId || "").slice(0, 24),
+        tmdbId: String(nfo.tmdbId || "").slice(0, 24),
+        sourceFile: String(nfo.sourceFile || "").slice(0, 260),
+      },
+    };
+    logger.info("合并 NFO 媒体身份完成: 保留番号", result.catalogCode);
+    return result;
+  }
+
+  // 1.5.3 电影使用片名，剧集优先使用系列名。
   const detectedEpisode = media.mediaType === "episode" || Number(nfo.season) > 0 || Number(nfo.episode) > 0;
   const title = cleanMetadataTitle(
     detectedEpisode
@@ -113,7 +145,7 @@ export function applyNfoMetadata(media, metadata) {
   const episodeEnd = media.episodeEnd || null;
   const mediaType = season && episode ? "episode" : media.mediaType;
 
-  // 1.5.3 生成主搜索词和别名搜索词
+  // 1.5.4 生成主搜索词和别名搜索词
   const episodeTag = mediaType === "episode" ? formatEpisodeTag(season, episode, episodeEnd) : "";
   const query = buildMetadataQuery(title, year, episodeTag, mediaType) || media.query;
   const rawAliases = [
@@ -129,7 +161,7 @@ export function applyNfoMetadata(media, metadata) {
     .filter(Boolean)
     .slice(0, 8);
 
-  // 1.5.4 返回可持久化的紧凑元数据
+  // 1.5.5 返回可持久化的紧凑元数据
   const result = {
     ...media,
     mediaType,
@@ -165,7 +197,8 @@ export function applyNfoMetadata(media, metadata) {
  * 目标：
  * 1) 识别与当前视频同名的字幕
  * 2) 兼容“视频名.语言.srt”和去掉发布参数后的常规命名
- * 3) 剧集必须核对季号和集号，避免把同一季其他集误判为已有字幕
+ * 3) 番号视频必须核对标准码，避免相邻番号误判为已有字幕
+ * 4) 剧集必须核对季号和集号，避免把同一季其他集误判为已有字幕
  */
 export function findExistingSubtitles(videoFileName, subtitleFileNames, options = {}) {
   logger.info("开始匹配已有字幕...", videoFileName);
@@ -181,9 +214,12 @@ export function findExistingSubtitles(videoFileName, subtitleFileNames, options 
     if (!SUBTITLE_EXTENSIONS.has(subtitleExtension)) return false;
 
     const subtitleStem = stripExtension(getFileName(subtitleFileName));
-    if (isDirectSubtitleNameMatch(videoStem, subtitleStem)) return true;
-
     const subtitle = analyzeMediaFile(subtitleFileName, options);
+    if (video.catalogKey) {
+      if (subtitle.catalogKey) return sameAvIdentity(video.catalogKey, subtitle.catalogKey);
+      return isDirectSubtitleNameMatch(videoStem, subtitleStem);
+    }
+    if (isDirectSubtitleNameMatch(videoStem, subtitleStem)) return true;
     if (video.mediaType === "episode") {
       if (subtitle.mediaType !== "episode") return false;
       if (video.season !== subtitle.season || video.episode !== subtitle.episode) return false;
@@ -218,7 +254,15 @@ export function compareMediaEntries(left, right) {
   const subtitleOrder = Number(Boolean(left?.hasSubtitle)) - Number(Boolean(right?.hasSubtitle));
   if (subtitleOrder) return subtitleOrder;
 
-  // 3.2 再按标题、季号和集号排序
+  // 3.2 番号媒体按标准码连续排列，避免恢复前缀打散同系列。
+  const leftCatalog = String(left?.catalogCode || "");
+  const rightCatalog = String(right?.catalogCode || "");
+  if (leftCatalog || rightCatalog) {
+    const catalogOrder = leftCatalog.localeCompare(rightCatalog, "en", { numeric: true, sensitivity: "base" });
+    if (catalogOrder) return catalogOrder;
+  }
+
+  // 3.3 再按标题、季号和集号排序
   const titleOrder = String(left?.title || left?.name || "").localeCompare(String(right?.title || right?.name || ""), "zh-CN", {
     numeric: true,
     sensitivity: "base",
@@ -229,7 +273,7 @@ export function compareMediaEntries(left, right) {
   const episodeOrder = Number(left?.episode || 0) - Number(right?.episode || 0);
   if (episodeOrder) return episodeOrder;
 
-  // 3.3 最后用路径保证顺序稳定
+  // 3.4 最后用路径保证顺序稳定
   return String(left?.relativePath || left?.path || left?.name || "").localeCompare(
     String(right?.relativePath || right?.path || right?.name || ""),
     "zh-CN",
@@ -300,7 +344,7 @@ function cleanTitle(value, year) {
   if (year) title = title.replace(new RegExp(`\\b${escapeRegExp(year)}\\b`, "g"), " ");
   return title
     .replace(RELEASE_FLAG_PATTERN, " ")
-    .replace(/\s+-\s*$/g, " ")
+    .replace(/[\s_-]+$/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

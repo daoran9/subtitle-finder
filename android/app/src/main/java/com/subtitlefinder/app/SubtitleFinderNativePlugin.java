@@ -396,6 +396,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
                 item.put("embeddedSubtitleStatus", embedded.getString("embeddedSubtitleStatus"));
                 item.put("embeddedSubtitleCount", embedded.getInteger("embeddedSubtitleCount"));
                 item.put("embeddedSubtitles", embedded.optJSONArray("embeddedSubtitles"));
+                item.put("videoDurationMs", embedded.optLong("videoDurationMs", 0L));
                 results.put(item);
                 if (results.length() >= MAX_VIDEO_SCAN_COUNT) break;
             }
@@ -429,6 +430,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
         item.put("embeddedSubtitleStatus", embedded.getString("embeddedSubtitleStatus"));
         item.put("embeddedSubtitleCount", embedded.getInteger("embeddedSubtitleCount"));
         item.put("embeddedSubtitles", embedded.optJSONArray("embeddedSubtitles"));
+        item.put("videoDurationMs", embedded.optLong("videoDurationMs", 0L));
 
         logger.info("生成单视频结果完成: " + name);
         return item;
@@ -624,6 +626,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
             response.put("embeddedSubtitleStatus", embedded.getString("embeddedSubtitleStatus"));
             response.put("embeddedSubtitleCount", embedded.getInteger("embeddedSubtitleCount"));
             response.put("embeddedSubtitles", embedded.optJSONArray("embeddedSubtitles"));
+            response.put("videoDurationMs", embedded.optLong("videoDurationMs", 0L));
             call.resolve(response);
             logger.info("分析 Android 视频完成");
         } catch (Exception error) {
@@ -693,10 +696,14 @@ public class SubtitleFinderNativePlugin extends Plugin {
         // 4.8.8 用系统媒体解析器读取文字轨
         MediaExtractor extractor = new MediaExtractor();
         JSArray tracks = new JSArray();
+        long videoDurationMs = 0L;
         try {
             extractor.setDataSource(getContext(), videoUri, null);
             for (int index = 0; index < extractor.getTrackCount(); index++) {
                 MediaFormat format = extractor.getTrackFormat(index);
+                if (videoDurationMs <= 0L && format.containsKey(MediaFormat.KEY_DURATION)) {
+                    videoDurationMs = Math.max(0L, format.getLong(MediaFormat.KEY_DURATION) / 1000L);
+                }
                 String mime = format.containsKey(MediaFormat.KEY_MIME) ? format.getString(MediaFormat.KEY_MIME) : "";
                 if (!isSubtitleMimeType(mime)) continue;
 
@@ -712,6 +719,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
             response.put("embeddedSubtitleStatus", "done");
             response.put("embeddedSubtitleCount", tracks.length());
             response.put("embeddedSubtitles", tracks);
+            response.put("videoDurationMs", videoDurationMs);
             logger.info("检测 Android 视频内封字幕完成, 数量: " + tracks.length());
             return response;
         } catch (Exception error) {
@@ -720,6 +728,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
             response.put("embeddedSubtitleStatus", "unknown");
             response.put("embeddedSubtitleCount", 0);
             response.put("embeddedSubtitles", tracks);
+            response.put("videoDurationMs", 0L);
             response.put("embeddedSubtitleError", error.getMessage());
             return response;
         } finally {

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   buildCatalogCodeSearchTerms,
+  buildSearchIntent,
   buildQueryVariants,
   buildSelectedSearchSources,
   extractCatalogCode,
@@ -10,10 +11,13 @@ import {
   isPublicIpv4Address,
   isRetryableSubHdSessionError,
   mergeSearchResultBuckets,
+  parseAiyiSearchApiResults,
+  parseAvSubtitlesSearchResults,
   parseAssrtWebSearchResults,
   parseSubHdSearchResults,
   runSubHdSessionWithRetry,
 } from "../server.mjs";
+import { extractAvIdentity } from "../public/av-identity.js";
 
 const ORIGINAL_SOURCE_KEYS = [
   "thunder",
@@ -276,6 +280,26 @@ test("编号检索生成横线空格和连写词", () => {
   assert.deepEqual(terms, ["ABC-123", "ABC 123", "ABC123"]);
 });
 
+// 3.2.1 手动紧凑输入同样需要转换成统一的三种检索词。
+test("小写紧凑编号可生成统一检索词", () => {
+  const terms = buildCatalogCodeSearchTerms("abc123");
+  assert.deepEqual(terms, ["ABC-123", "ABC 123", "ABC123"]);
+});
+
+// 3.2.2 本地视频的迅雷检索保留原文件名，专项源只拿标准番号变体。
+test("番号视频按来源分配原文件名和标准检索词", () => {
+  const catalogIdentity = extractAvIdentity("JAC-089");
+  const intent = buildSearchIntent({
+    query: "JAC-089",
+    queryVariants: ["JAC-089", "JAC 089"],
+    videoFileName: "390JAC-089.restored.mp4",
+    hasLocalVideo: true,
+    catalogIdentity,
+  });
+  assert.deepEqual(intent.thunderVariants, ["390JAC-089.restored.mp4"]);
+  assert.deepEqual(intent.catalogVariants, ["JAC-089", "JAC 089", "JAC089"]);
+});
+
 // 3.3 全部搜索继续调度两个专项编号源
 test("编号查询的全部搜索继续调度专项来源", () => {
   const selected = buildSelectedSearchSources({
@@ -299,6 +323,56 @@ test("编号结果不会被影视标题过滤误删", () => {
     { queryVariants: buildQueryVariants("ABC-123 1080p") }
   );
   assert.deepEqual(results.map((item) => item.source).sort(), ["aiyi", "avsubtitles"]);
+});
+
+// 3.4.1 合并阶段仍需排除相邻番号，不能依赖来源页已过滤。
+test("合并结果会排除相邻番号", () => {
+  const catalogIdentity = extractAvIdentity("JAC-089");
+  const results = mergeSearchResultBuckets(
+    [[
+      { source: "subtitlecat", title: "JAC-0890 中文字幕", fileName: "JAC-0890.zh.srt" },
+      { source: "subtitlecat", title: "JAC-089 中文字幕", fileName: "JAC-089.zh.srt" },
+    ]],
+    40,
+    { queryVariants: ["JAC-089"], catalogIdentity }
+  );
+  assert.deepEqual(results.map((item) => item.fileName), ["JAC-089.zh.srt"]);
+});
+
+// 3.4.1.1 不能因为来源元数据写了目标码，就忽略标题里的冲突号码。
+test("结果字段出现冲突番号时会整体淘汰", () => {
+  const catalogIdentity = extractAvIdentity("JAC-089");
+  const results = mergeSearchResultBuckets(
+    [[{
+      source: "subtitlecat",
+      catalogCode: "JAC-089",
+      title: "JAC-0890 中文字幕",
+      fileName: "JAC-0890.zh.srt",
+    }]],
+    40,
+    { queryVariants: ["JAC-089"], catalogIdentity }
+  );
+  assert.deepEqual(results, []);
+});
+
+// 3.4.2 专项来源解析页必须同样排除相邻番号。
+test("专项来源解析会排除相邻番号", () => {
+  const catalogIdentity = extractAvIdentity("JAC-089");
+  const avHtml = `
+    <a href="/movie1/jac-089">JAC-089</a>
+    <a href="/movie2/jac-0890">JAC-0890</a>`;
+  const aiyiItems = [
+    { title: "JAC-089 中文字幕", url: "https://www.aiyi1.com/100.html" },
+    { title: "JAC-0890 中文字幕", url: "https://www.aiyi1.com/101.html" },
+  ];
+  assert.deepEqual(
+    parseAvSubtitlesSearchResults(avHtml, catalogIdentity, 10).map((item) => item.title),
+    ["JAC-089"]
+  );
+  assert.deepEqual(
+    parseAiyiSearchApiResults(aiyiItems, catalogIdentity, 10).map((item) => item.title),
+    ["JAC-089 中文字幕"]
+  );
 });
 
 logger.info("验证专项编号检索策略完成");

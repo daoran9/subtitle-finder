@@ -69,11 +69,13 @@ await mkdir(targetPublicDir, { recursive: true });
 for (const fileName of [
   "index.html",
   "styles.css",
+  "av-identity.js",
   "conversion-dictionary.js",
   "media-library.js",
   "scan-rules.js",
   "subtitle-rules.js",
   "app.js",
+  "drive115.js",
   "mobile.js",
   "capacitor.js",
   "capacitor-early-bridge.js",

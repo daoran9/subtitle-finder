@@ -984,6 +984,7 @@ async function scanVideoFiles(directory, options = {}) {
     item.embeddedSubtitleStatus = embedded.embeddedSubtitleStatus;
     item.embeddedSubtitleCount = embedded.embeddedSubtitleCount;
     item.embeddedSubtitles = embedded.embeddedSubtitles;
+    item.videoDurationMs = Number(embedded.videoDurationMs || 0);
     item.hasEmbeddedSubtitle = embedded.embeddedSubtitleCount > 0;
     item.hasSubtitle = item.hasSubtitle || item.hasEmbeddedSubtitle;
   });
@@ -1128,7 +1129,10 @@ async function inspectEmbeddedSubtitleTracks(videoPath) {
     );
 
     // 6.7.3 整理文字轨信息
-    const tracks = (Array.isArray(result?.media?.track) ? result.media.track : [])
+    const tracks = (Array.isArray(result?.media?.track) ? result.media.track : []);
+    const generalTrack = tracks.find((track) => track?.["@type"] === "General") || {};
+    const videoDurationMs = parseMediaInfoDurationMs(generalTrack.Duration);
+    const subtitleTracks = tracks
       .filter((track) => track?.["@type"] === "Text")
       .map((track) => ({
         language: track.Language_String || track.Language || "未知",
@@ -1139,11 +1143,12 @@ async function inspectEmbeddedSubtitleTracks(videoPath) {
       }));
     const response = {
       embeddedSubtitleStatus: "done",
-      embeddedSubtitleCount: tracks.length,
-      embeddedSubtitles: tracks,
+      embeddedSubtitleCount: subtitleTracks.length,
+      embeddedSubtitles: subtitleTracks,
+      videoDurationMs,
     };
 
-    logger.info("检测桌面视频内封字幕完成", tracks.length);
+    logger.info("检测桌面视频内封字幕完成", subtitleTracks.length);
     return response;
   } catch (error) {
     logger.error("检测桌面视频内封字幕失败", videoPath, error);
@@ -1151,12 +1156,19 @@ async function inspectEmbeddedSubtitleTracks(videoPath) {
       embeddedSubtitleStatus: "unknown",
       embeddedSubtitleCount: 0,
       embeddedSubtitles: [],
+      videoDurationMs: 0,
       embeddedSubtitleError: String(error?.message || error),
     };
   } finally {
     if (mediaInfo) mediaInfo.close();
     if (fileHandle) await fileHandle.close();
   }
+}
+
+function parseMediaInfoDurationMs(value) {
+  // MediaInfo 的结构化 Duration 以秒计，搜索和排序统一使用毫秒。
+  const durationMs = Math.round(Number(value || 0) * 1000);
+  return Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0;
 }
 
 async function mapWithConcurrency(items, concurrency, worker) {
@@ -1834,6 +1846,10 @@ function installConsoleFileLogger() {
    * 2) 保留原始控制台输出，方便开发调试
    */
 
+  // 管道断开也可能在写入返回后通过流的 error 事件报告。
+  process.stdout.on("error", handleConsoleWriteError);
+  process.stderr.on("error", handleConsoleWriteError);
+
   // 20.1 保存原始控制台方法
   const originalConsole = {
     info: console.info.bind(console),
@@ -1870,13 +1886,15 @@ function safeOriginalConsoleWrite(writer, args) {
   try {
     writer(...args);
   } catch (error) {
-    const message = String(error && error.message ? error.message : error || "");
-    const code = String(error && error.code ? error.code : "");
-    if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || /broken pipe/i.test(message)) {
-      return;
-    }
-    throw error;
+    handleConsoleWriteError(error);
   }
+}
+
+function handleConsoleWriteError(error) {
+  if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED" || /broken pipe/i.test(error?.message)) {
+    return;
+  }
+  throw error;
 }
 
 function appendLogLine(level, args) {

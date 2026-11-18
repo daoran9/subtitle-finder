@@ -1,0 +1,22 @@
+{
+  "query": "JAC-089",
+  "fileName": "390JAC-089.restored.mp4",
+  "language": "zh-CN",
+  "thunder": {
+    "code": 0,
+    "result": "ok",
+    "data": [
+      { "gcid": "a", "cid": "1", "name": "JAC-089.zh.srt", "url": "https://fixtures.invalid/a.srt", "ext": "srt", "duration": 7200000, "languages": ["zh-CN"], "score": 80, "fingerprintf_score": 75, "extra_name": "" },
+      { "gcid": "b", "cid": "2", "name": "JAC-0890.zh.srt", "url": "https://fixtures.invalid/b.srt", "ext": "srt", "duration": 7200000, "languages": ["zh-CN"], "score": 100, "fingerprintf_score": 99, "extra_name": "" },
+      { "gcid": "c", "cid": "3", "name": "JAC-089.en.ass", "url": "https://fixtures.invalid/c.ass", "ext": "ass", "duration": 7100000, "languages": ["en"], "score": 90, "fingerprintf_score": 85, "extra_name": "" }
+    ]
+  },
+  "subtitlecat": [
+    { "title": "JAC-089 Chinese", "href": "sub/a.html", "downloads": 100, "comment": "up" },
+    { "title": "JAC-0890 Chinese", "href": "sub/b.html", "downloads": 999, "comment": "up" },
+    { "title": "jac 089 English", "href": "sub/c.html", "downloads": 50, "comment": "none" },
+    { "title": "JAC-089 Japanese", "href": "sub/d.html", "downloads": 20, "comment": "down" },
+    { "title": "JAC-089 Alternate", "href": "sub/e.html", "downloads": 10, "comment": "none" },
+    { "title": "JAC-089 Sixth", "href": "sub/f.html", "downloads": 5, "comment": "none" }
+  ]
+}

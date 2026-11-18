@@ -108,9 +108,11 @@ test("通用设置跨重启恢复并限制字段", async () => {
   try {
     const store = createRuntimeStore(directory);
     await store.initialize();
+    assert.equal((await store.readPreferences()).matchVideoName, true);
     await store.writePreferences({
       scanExclusionRules: ["**/Extras/**", "*.sample.*"],
       customDictionary: "软件=軟件\n出租车=計程車",
+      matchVideoName: false,
       ignored: "不会保存",
     });
 
@@ -120,6 +122,7 @@ test("通用设置跨重启恢复并限制字段", async () => {
     assert.deepEqual(await restored.readPreferences(), {
       scanExclusionRules: ["**/Extras/**", "*.sample.*"],
       customDictionary: "软件=軟件\n出租车=計程車",
+      matchVideoName: false,
     });
     await assert.rejects(() => restored.writePreferences({ customDictionary: "错误格式" }), /第 1 行/);
     await assert.rejects(() => restored.writePreferences({ token: "private" }), /无效/);

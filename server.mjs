@@ -12,11 +12,17 @@ import iconv from "iconv-lite";
 import SevenZip from "7z-wasm";
 import unrar from "node-unrar-js";
 import { createRuntimeStore } from "./lib/runtime-store.mjs";
+import { Drive115 } from "./lib/drive115.mjs";
 import {
   buildConvertedSubtitleFileName,
   convertSubtitleChinese,
   validateSubtitleText,
 } from "./lib/subtitle-tools.mjs";
+import {
+  buildAvSearchTerms,
+  extractAvIdentity,
+  sameAvIdentity,
+} from "./public/av-identity.js";
 import { scoreArchiveSubtitle, scoreSubtitleCandidate } from "./public/subtitle-rules.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,6 +39,7 @@ const SUBHD_SEARCH_TIMEOUT_MS = 24000;
 const SUBHD_SESSION_RETRY_DELAY_MS = 350;
 const RESULT_CACHE = new Map();
 const SUBTITLE_PAYLOAD_CACHE = new Map();
+const STRICT_CATALOG_SOURCE_KEYS = new Set(["subtitlecat", "avsubtitles", "aiyi"]);
 const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const SEARCH_CACHE_PARTIAL_TTL_MS = 5 * 60 * 1000;
 const SUBTITLE_PAYLOAD_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -61,7 +68,7 @@ const SEVEN_ZIP_WASM_PATH = path.join(__dirname, "vendor", "7zz.wasm");
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
 let runtimePort = DEFAULT_PORT;
 let runtimeStore = null;
-let runtimePreferences = { scanExclusionRules: [], customDictionary: "" };
+let runtimePreferences = { scanExclusionRules: [], customDictionary: "", matchVideoName: true };
 let unrarWasmBinaryPromise = null;
 let sevenZipWasmBinaryPromise = null;
 const assrtFileDnsCache = new Map();
@@ -148,11 +155,12 @@ export async function startServer(options = {}) {
   runtimeStore = createRuntimeStore(dataDir);
   await runtimeStore.initialize();
   runtimePreferences = await runtimeStore.readPreferences();
+  const drive115 = new Drive115(options.drive115Fetch);
 
   // 1.3 创建 HTTP 服务
   const server = createServer(async (req, res) => {
     try {
-      await routeRequest(req, res);
+      await routeRequest(req, res, drive115);
     } catch (error) {
       logger.error("请求处理失败", error);
       sendJson(res, 500, { error: "服务内部错误", detail: String(error?.message || error) });
@@ -176,7 +184,7 @@ export async function startServer(options = {}) {
   return { server, host, port: runtimePort, url };
 }
 
-async function routeRequest(req, res) {
+async function routeRequest(req, res, drive115) {
   const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${runtimePort}`}`);
 
   /*
@@ -189,6 +197,11 @@ async function routeRequest(req, res) {
    * 3) /api/download 下载原始字幕文件
    */
   logger.info("开始分发请求...", req.method, url.pathname);
+
+  if (url.pathname.startsWith("/api/drive115/")) {
+    await handleDrive115(req, res, url, drive115);
+    return;
+  }
 
   // 2.1 处理跨源预检
   if (req.method === "OPTIONS") {
@@ -251,6 +264,47 @@ async function routeRequest(req, res) {
   logger.info("请求分发完成: static");
 }
 
+async function handleDrive115(req, res, url, drive) {
+  const origin = req.headers.origin;
+  const allowedOrigins = [`http://127.0.0.1:${runtimePort}`, `http://localhost:${runtimePort}`, "http://localhost", "https://localhost", "capacitor://localhost"];
+  if (origin && !allowedOrigins.includes(origin)) {
+    sendJson(res, 403, { error: "不允许的请求来源" });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method === "OPTIONS") {
+    sendEmpty(res, 204);
+    return;
+  }
+  const action = url.pathname.slice("/api/drive115/".length);
+  try {
+    if (req.method === "GET" && action === "status") return sendJson(res, 200, drive.status());
+    if (req.method === "GET" && action === "files") return sendJson(res, 200, await drive.list(url.searchParams.get("parentId") || "0", Number(url.searchParams.get("offset") || 0)));
+    if (req.method === "GET" && action === "qr-image") {
+      const image = await drive.qrImage(url.searchParams.get("id"));
+      res.writeHead(200, withCorsHeaders({ "content-type": image.contentType, "cache-control": "no-store", "x-content-type-options": "nosniff" }));
+      res.end(image.buffer);
+      return;
+    }
+    if (req.method !== "POST") return sendJson(res, 405, { error: "请求方法不支持" });
+    if (!/^application\/json\b/i.test(req.headers["content-type"] || "")) return sendJson(res, 415, { error: "需要 JSON 请求" });
+    const body = await readJsonRequest(req, 16 * 1024);
+    if (action === "login") return sendJson(res, 200, await drive.begin(body.app));
+    if (action === "poll") return sendJson(res, 200, await drive.poll(body.id));
+    if (action === "logout") { drive.logout(); return sendJson(res, 200, { ok: true }); }
+    if (action === "save") {
+      const result = RESULT_CACHE.get(String(body.resultId || ""));
+      if (!result) return sendJson(res, 404, { error: "字幕结果已过期，请重新搜索" });
+      const { matchVideoName } = runtimePreferences;
+      const { payload } = await getValidatedSubtitlePayload({ ...result }, String(body.language || "zh-CN"), normalizeConversionTarget(body.conversion));
+      return sendJson(res, 200, await drive.save(body.video, payload, matchVideoName));
+    }
+    sendJson(res, 404, { error: "未找到接口" });
+  } catch (error) {
+    sendJson(res, 400, { error: String(error.message || "115 操作失败") });
+  }
+}
+
 async function handleSearch(req, url, res) {
   /*
    * ================================================================================
@@ -270,11 +324,18 @@ async function handleSearch(req, url, res) {
   const limit = clamp(Number(url.searchParams.get("limit") || 40), 1, 100);
   const shooterHash = (url.searchParams.get("shooterHash") || "").trim();
   const thunderCid = (url.searchParams.get("thunderCid") || "").trim();
-  const videoFileName = sanitizeFileName((url.searchParams.get("videoFileName") || "video.mkv").trim());
+  const requestedVideoFileName = (url.searchParams.get("videoFileName") || "").trim();
+  const videoFileName = sanitizeFileName(requestedVideoFileName || "video.mkv");
   const releaseName = (url.searchParams.get("releaseName") || videoFileName || query).trim();
+  const requestedCatalogCode = (url.searchParams.get("catalogCode") || "").trim();
+  const videoDurationMs = clamp(Number(url.searchParams.get("videoDurationMs") || 0), 0, 24 * 60 * 60 * 1000);
   const assrtToken = String(req.headers["x-assrt-token"] || "").trim().slice(0, 256);
   const metadataAliases = url.searchParams.getAll("alias").map((item) => String(item || "").trim()).filter(Boolean).slice(0, 8);
   const requestedEpisode = parseEpisodeQuery(query);
+  const catalogIdentity = extractAvIdentity(requestedCatalogCode || query, {
+    // 本地扫描传来的标准码保持保守，手动输入才允许 abc123 这类紧凑小写号码。
+    allowLooseCode: !requestedCatalogCode,
+  });
 
   if (!query) {
     sendJson(res, 400, { error: "请输入搜索字段或文件名" });
@@ -302,6 +363,8 @@ async function handleSearch(req, url, res) {
     thunderCid,
     videoFileName,
     releaseName,
+    catalogCode: catalogIdentity?.canonicalCode || "",
+    videoDurationMs,
     metadataAliases,
     assrtToken,
   });
@@ -315,9 +378,19 @@ async function handleSearch(req, url, res) {
 
   // 3.3 按选择组装字幕源
   const queryVariants = buildQueryVariants(query, metadataAliases);
+  const searchIntent = buildSearchIntent({
+    query,
+    queryVariants,
+    videoFileName,
+    hasLocalVideo: Boolean(requestedVideoFileName),
+    catalogIdentity,
+  });
   const selectedSources = buildSelectedSearchSources({
     source,
-    queryVariants,
+    queryVariants: searchIntent.generalVariants,
+    catalogVariants: searchIntent.catalogVariants,
+    thunderQueryVariants: searchIntent.thunderVariants,
+    catalogIdentity,
     language,
     shooterHash,
     thunderCid,
@@ -331,25 +404,43 @@ async function handleSearch(req, url, res) {
     searchSourceWithTimeout(sourceItem.name, () => sourceItem.search(perSourceLimit), sourceItem.timeoutMs)
   );
   const settled = await settleAllSearchSourcesWithTimeout(tasks, getOverallSearchTimeoutMs(selectedSources, source));
-  const filteredBuckets = settled.map((item) =>
-    item.status === "fulfilled" ? filterResultsByEpisode(item.value.results.filter(Boolean), requestedEpisode) : []
-  );
+  const filteredBuckets = settled.map((item, index) => {
+    if (item.status !== "fulfilled") {
+      return { results: [], sourceCount: 0, matchedCount: 0, catalogMismatchCount: 0, catalogUnknownCount: 0 };
+    }
+    const episodeResults = filterResultsByEpisode(item.value.results.filter(Boolean), requestedEpisode);
+    const details = { catalogMismatchCount: 0, catalogUnknownCount: 0 };
+    const results = filterResultsByCatalogIdentity(episodeResults, catalogIdentity, selectedSources[index], details);
+    return {
+      results,
+      sourceCount: episodeResults.length,
+      matchedCount: results.length,
+      ...details,
+    };
+  });
   const sourceStats = mergeSourceStats(
-    buildSourceStats(selectedSources, settled, filteredBuckets, queryVariants),
+    buildSourceStats(selectedSources, settled, filteredBuckets, searchIntent.generalVariants),
     buildUnavailableSourceStats({ source, shooterHash, thunderCid })
   );
   const errors = sourceStats
     .filter((item) => item.status !== "done" && item.status !== "skipped")
     .map((item) => `${item.sourceLabel}: ${item.message}`);
-  const qualityContext = { query, language, requestedEpisode, releaseName };
+  const qualityContext = { query, language, requestedEpisode, releaseName, catalogIdentity, videoDurationMs };
   const resultBuckets = filteredBuckets
+    .map((bucket) => bucket.results)
     .filter((bucket) => bucket.length)
     .map((bucket) => bucket.map((result) => attachQualityScore(result, qualityContext)));
-  const internalResults = mergeSearchResultBuckets(resultBuckets, limit, { queryVariants, requestedEpisode, balanced: source === "all" });
+  const internalResults = mergeSearchResultBuckets(resultBuckets, limit, {
+    queryVariants: searchIntent.generalVariants,
+    requestedEpisode,
+    catalogIdentity,
+    videoDurationMs,
+    balanced: source === "all",
+  });
   const publicResults = internalResults.map(cacheResult);
 
   // 3.5 只缓存至少有一个来源完成的搜索，纯超时或纯失败结果允许用户立即重试
-  const searchPayload = { query, source, language, variants: queryVariants, internalResults, errors, sourceStats };
+  const searchPayload = { query, source, language, variants: searchIntent.generalVariants, internalResults, errors, sourceStats };
   const hasCompletedSource = sourceStats.some((item) => item.status === "done");
   const searchTtlMs = errors.length || !internalResults.length ? SEARCH_CACHE_PARTIAL_TTL_MS : SEARCH_CACHE_TTL_MS;
   if (hasCompletedSource) {
@@ -359,7 +450,18 @@ async function handleSearch(req, url, res) {
   }
 
   // 3.6 返回结果
-  sendJson(res, 200, { query, source, language, variants: queryVariants, count: publicResults.length, results: publicResults, errors, sourceStats, cached: false });
+  sendJson(res, 200, {
+    query,
+    source,
+    language,
+    variants: searchIntent.generalVariants,
+    catalogCode: catalogIdentity?.canonicalCode || "",
+    count: publicResults.length,
+    results: publicResults,
+    errors,
+    sourceStats,
+    cached: false,
+  });
   logger.info(`搜索字幕完成: ${publicResults.length} 条`);
 }
 
@@ -387,6 +489,8 @@ function buildSearchCacheKey(options) {
     thunderCid: options.thunderCid,
     videoFileName: options.videoFileName,
     releaseName: options.releaseName,
+    catalogCode: options.catalogCode,
+    videoDurationMs: options.videoDurationMs,
     metadataAliases: [...(options.metadataAliases || [])].map((item) => item.normalize("NFKC").toLowerCase()).sort(),
     tokenDigest,
   });
@@ -485,7 +589,7 @@ async function handleAppSettings(req, res) {
     try {
       const body = await readJsonRequest(req, 64 * 1024);
       const result = await runtimeStore?.writePreferences(body?.settings);
-      runtimePreferences = result?.preferences || { scanExclusionRules: [], customDictionary: "" };
+      runtimePreferences = result?.preferences || runtimePreferences;
       sendJson(res, 200, { saved: true, settings: runtimePreferences, updatedAt: result?.updatedAt || Date.now() });
       logger.info("处理通用设置完成: saved");
     } catch (error) {
@@ -516,6 +620,10 @@ async function readJsonRequest(req, maxBytes) {
 export function buildSelectedSearchSources({
   source,
   queryVariants,
+  catalogVariants = [],
+  thunderQueryVariants = [],
+  catalogIdentity = null,
+  request = fetchWithTimeout,
   language,
   shooterHash = "",
   thunderCid = "",
@@ -549,7 +657,11 @@ export function buildSelectedSearchSources({
     {
       key: "thunder",
       name: "迅雷字幕",
-      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchThunder(variant, sourceLimit)),
+      search: (sourceLimit) => searchWithQueryVariants(
+        thunderQueryVariants.length ? thunderQueryVariants : queryVariants,
+        sourceLimit,
+        (variant) => searchThunder(variant, sourceLimit, request)
+      ),
     },
     {
       key: "assrt",
@@ -566,7 +678,12 @@ export function buildSelectedSearchSources({
     {
       key: "subtitlecat",
       name: "SubtitleCat",
-      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchSubtitleCat(variant, language, sourceLimit)),
+      strictCatalogIdentity: Boolean(catalogIdentity),
+      search: (sourceLimit) => searchWithQueryVariants(
+        catalogVariants.length ? catalogVariants : queryVariants,
+        sourceLimit,
+        (variant) => searchSubtitleCat(variant, language, sourceLimit, request)
+      ),
     },
     {
       key: "yify",
@@ -599,13 +716,15 @@ export function buildSelectedSearchSources({
       key: "avsubtitles",
       name: "AVSubtitles",
       timeoutMs: 16000,
-      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAvSubtitles(variant, language, sourceLimit)),
+      strictCatalogIdentity: Boolean(catalogIdentity),
+      search: (sourceLimit) => catalogIdentity ? searchAvSubtitles(catalogIdentity.canonicalCode, language, sourceLimit) : [],
     },
     {
       key: "aiyi",
       name: "爱译网",
       timeoutMs: 12000,
-      search: (sourceLimit) => searchWithQueryVariants(queryVariants, sourceLimit, (variant) => searchAiyi(variant, language, sourceLimit)),
+      strictCatalogIdentity: Boolean(catalogIdentity),
+      search: (sourceLimit) => catalogIdentity ? searchAiyi(catalogIdentity.canonicalCode, language, sourceLimit) : [],
     },
   ];
 
@@ -620,6 +739,53 @@ export function buildSelectedSearchSources({
     );
   logger.info(`组装搜索源完成: ${selected.map((item) => item.name).join(", ") || "empty"}`);
   return selected;
+}
+
+/*
+ * ================================================================================
+ * 步骤4.25：构建字幕搜索意图
+ * ================================================================================
+ * 目标：
+ * 1) 番号视频把原始文件名和标准番号检索词分配给正确来源
+ * 2) 普通电影、剧集和 NFO 别名继续使用既有查询变体
+ */
+export function buildSearchIntent({ query, queryVariants, videoFileName, hasLocalVideo = false, catalogIdentity = null }) {
+  logger.info("开始构建字幕搜索意图...");
+
+  // 4.25.1 非番号搜索完全保留现有查询行为。
+  const generalVariants = uniqueSearchTerms(queryVariants);
+  if (!catalogIdentity) {
+    const result = {
+      generalVariants,
+      catalogVariants: [],
+      thunderVariants: generalVariants,
+    };
+    logger.info("构建字幕搜索意图完成: 常规");
+    return result;
+  }
+
+  // 4.25.2 专项来源只接收标准番号、空格和紧凑三种索引写法。
+  const catalogVariants = buildAvSearchTerms(catalogIdentity);
+  const thunderVariants = hasLocalVideo
+    ? uniqueSearchTerms([videoFileName])
+    : uniqueSearchTerms([query, ...catalogVariants]);
+  const result = {
+    generalVariants,
+    catalogVariants,
+    thunderVariants,
+  };
+
+  logger.info("构建字幕搜索意图完成: 番号", catalogIdentity.canonicalCode);
+  return result;
+}
+
+function uniqueSearchTerms(values) {
+  const result = [];
+  for (const value of Array.isArray(values) ? values : [values]) {
+    const term = String(value || "").replace(/\s+/g, " ").trim();
+    if (term && !result.some((item) => item.toLowerCase() === term.toLowerCase())) result.push(term);
+  }
+  return result;
 }
 
 function buildUnavailableSourceStats({ source, shooterHash, thunderCid }) {
@@ -797,9 +963,17 @@ function buildSourceStats(selectedSources, settled, filteredBuckets, queryVarian
     const item = settled[index];
     if (item?.status === "fulfilled") {
       const durationMs = Number(item.value?.durationMs || 0);
-      const bucket = Array.isArray(filteredBuckets[index]) ? filteredBuckets[index] : [];
-      const count = bucket.length;
-      const matchedCount = bucket.filter((result) => searchResultMatchesTitle(result, needles)).length;
+      const filterState = filteredBuckets[index] || {};
+      const bucket = Array.isArray(filterState) ? filterState : filterState.results || [];
+      const count = Number.isFinite(Number(filterState.sourceCount)) ? Number(filterState.sourceCount) : bucket.length;
+      const matchedCount = Number.isFinite(Number(filterState.matchedCount))
+        ? Number(filterState.matchedCount)
+        : bucket.filter((result) => searchResultMatchesTitle(result, needles)).length;
+      const catalogMismatchCount = Number(filterState.catalogMismatchCount || 0);
+      const catalogUnknownCount = Number(filterState.catalogUnknownCount || 0);
+      const messageParts = [];
+      if (catalogMismatchCount) messageParts.push(`淘汰 ${catalogMismatchCount} 条番号不一致`);
+      if (catalogUnknownCount) messageParts.push(`淘汰 ${catalogUnknownCount} 条未识别番号`);
       return {
         source: sourceItem.key,
         sourceLabel: sourceItem.name,
@@ -809,7 +983,7 @@ function buildSourceStats(selectedSources, settled, filteredBuckets, queryVarian
         matchedCount,
         durationMs,
         duration: formatSourceStatDuration(durationMs),
-        message: "",
+        message: messageParts.join("；"),
       };
     }
 
@@ -957,13 +1131,14 @@ export function mergeSearchResultBuckets(buckets, limit, options = {}) {
 
   // 6.1 去重并过滤明显无关结果
   const needles = buildTitleNeedles(options.queryVariants || []);
+  const catalogIdentity = options.catalogIdentity || null;
   const seen = new Set();
   const sourceCap = options.balanced ? Math.max(12, Math.ceil(limit / 3)) : limit;
   const candidates = [];
   for (const bucket of buckets) {
     let sourceCount = 0;
     for (const result of bucket) {
-      if (!searchResultMatchesTitle(result, needles)) continue;
+      if (!searchResultMatchesTitle(result, needles, catalogIdentity)) continue;
       const key = getSearchResultKey(result);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -974,7 +1149,7 @@ export function mergeSearchResultBuckets(buckets, limit, options = {}) {
   }
 
   // 6.2 先按片名归组，再在组内按季集、来源稳定排序
-  const grouped = buildGroupedSearchResults(candidates, needles, options.requestedEpisode);
+  const grouped = buildGroupedSearchResults(candidates, needles, options.requestedEpisode, catalogIdentity, options.videoDurationMs);
   const merged = grouped.flatMap((group) => group.items).slice(0, limit);
 
   logger.info(`合并多源结果完成: ${merged.length} 条`);
@@ -1007,12 +1182,12 @@ function buildTitleNeedles(queryVariants) {
     if (!value) continue;
 
     // 6.4.1 编号查询保留完整原词，同时加入带分隔符和连写形式
-    const catalogCode = extractCatalogCode(value);
+    const catalogIdentity = extractAvIdentity(value, { allowLooseCode: true });
+    const catalogCode = catalogIdentity?.compactCode || "";
     const catalogFamily = catalogCode ? `catalog:${catalogCode.toLowerCase()}` : "";
     addNeedle(value, catalogFamily);
-    if (catalogCode) {
-      addNeedle(formatCatalogCode(catalogCode, "-"), catalogFamily);
-      addNeedle(catalogCode, catalogFamily);
+    if (catalogIdentity) {
+      for (const term of catalogIdentity.variants) addNeedle(term, catalogFamily);
     }
   }
   return needles;
@@ -1026,16 +1201,26 @@ function stripEpisodeTokens(value) {
     .replace(/\s+/g, " ");
 }
 
-function searchResultMatchesTitle(result, needles) {
+function searchResultMatchesTitle(result, needles, catalogIdentity = null) {
   // 6.6 判断结果是否匹配片名关键词
+  if (catalogIdentity) {
+    const catalogState = inspectResultCatalogIdentity(result, catalogIdentity);
+    if (catalogState.mismatch) return false;
+    if (catalogState.match) return true;
+    return Boolean(result.fingerprintMatch || !STRICT_CATALOG_SOURCE_KEYS.has(result.source));
+  }
   if (result.fingerprintMatch) return true;
   if (!needles.length) return true;
   const text = normalizeComparableText(getSearchResultText(result));
   return needles.some((needle) => text.includes(needle.normalized));
 }
 
-function compareSearchResults(left, right, needles, requestedEpisode) {
+function compareSearchResults(left, right, needles, requestedEpisode, catalogIdentity = null, videoDurationMs = 0) {
   // 6.7 比较搜索结果展示顺序
+  const identityOrder = compareCatalogIdentity(left, right, catalogIdentity);
+  if (identityOrder) return identityOrder;
+  const durationOrder = compareCatalogDuration(left, right, catalogIdentity, videoDurationMs);
+  if (durationOrder) return durationOrder;
   const leftQuality = Number(left.qualityScore || 0);
   const rightQuality = Number(right.qualityScore || 0);
   if (leftQuality !== rightQuality) return rightQuality - leftQuality;
@@ -1055,7 +1240,7 @@ function compareSearchResults(left, right, needles, requestedEpisode) {
   return String(left.title || "").localeCompare(String(right.title || ""));
 }
 
-function buildGroupedSearchResults(results, needles, requestedEpisode) {
+function buildGroupedSearchResults(results, needles, requestedEpisode, catalogIdentity = null, videoDurationMs = 0) {
   /*
    * ================================================================================
    * 步骤6.8：按片名归组搜索结果
@@ -1073,8 +1258,10 @@ function buildGroupedSearchResults(results, needles, requestedEpisode) {
     const entry = {
       result,
       groupKey,
-      score: scoreSearchResult(result, needles, requestedEpisode),
+      score: scoreSearchResult(result, needles, requestedEpisode, catalogIdentity, videoDurationMs),
       qualityScore: Number(result.qualityScore || 0),
+      catalogRank: getCatalogIdentityRank(result, catalogIdentity),
+      durationDeltaMs: getCatalogDurationDelta(result, catalogIdentity, videoDurationMs),
       episodeKey: getSearchResultEpisodeKey(result),
       sourceOrder: getSourceOrder(result.source),
       title: String(result.title || ""),
@@ -1090,9 +1277,10 @@ function buildGroupedSearchResults(results, needles, requestedEpisode) {
         .sort((left, right) => compareGroupedSearchEntries(left, right))
         .map((entry) => entry.result);
       const bestScore = Math.max(...entries.map((entry) => entry.score), 0);
+      const bestCatalogRank = Math.max(...entries.map((entry) => entry.catalogRank), 0);
       const bestQuality = Math.max(...entries.map((entry) => entry.qualityScore), 0);
       const bestEpisodeKey = Math.min(...entries.map((entry) => entry.episodeKey), 999999);
-      return { groupKey, bestScore, bestQuality, bestEpisodeKey, items };
+      return { groupKey, bestScore, bestCatalogRank, bestQuality, bestEpisodeKey, items };
     })
     .sort((left, right) => compareSearchResultGroups(left, right));
 
@@ -1102,6 +1290,8 @@ function buildGroupedSearchResults(results, needles, requestedEpisode) {
 
 function compareGroupedSearchEntries(left, right) {
   // 6.8.3 比较组内条目顺序
+  if (left.catalogRank !== right.catalogRank) return right.catalogRank - left.catalogRank;
+  if (left.durationDeltaMs !== right.durationDeltaMs) return left.durationDeltaMs - right.durationDeltaMs;
   if (left.qualityScore !== right.qualityScore) return right.qualityScore - left.qualityScore;
   if (left.score !== right.score) return right.score - left.score;
   if (left.episodeKey !== right.episodeKey) return left.episodeKey - right.episodeKey;
@@ -1111,13 +1301,14 @@ function compareGroupedSearchEntries(left, right) {
 
 function compareSearchResultGroups(left, right) {
   // 6.8.4 比较片名分组顺序
+  if (left.bestCatalogRank !== right.bestCatalogRank) return right.bestCatalogRank - left.bestCatalogRank;
   if (left.bestScore !== right.bestScore) return right.bestScore - left.bestScore;
   if (left.bestQuality !== right.bestQuality) return right.bestQuality - left.bestQuality;
   if (left.bestEpisodeKey !== right.bestEpisodeKey) return left.bestEpisodeKey - right.bestEpisodeKey;
   return left.groupKey.localeCompare(right.groupKey);
 }
 
-function scoreSearchResult(result, needles, requestedEpisode) {
+function scoreSearchResult(result, needles, requestedEpisode, catalogIdentity = null, videoDurationMs = 0) {
   // 6.9 给搜索结果计算相关度
   const title = normalizeComparableText(result.title || "");
   const text = normalizeComparableText(getSearchResultText(result));
@@ -1125,6 +1316,9 @@ function scoreSearchResult(result, needles, requestedEpisode) {
   let titleScore = 0;
 
   if (result.fingerprintMatch) score += 240;
+  score += getCatalogIdentityRank(result, catalogIdentity) * 180;
+  const durationDeltaMs = getCatalogDurationDelta(result, catalogIdentity, videoDurationMs);
+  if (durationDeltaMs < Number.POSITIVE_INFINITY) score += Math.max(0, 60 - Math.round(durationDeltaMs / 60000));
 
   for (const [index, needle] of needles.entries()) {
     if (title.includes(needle.normalized)) titleScore = Math.max(titleScore, 80 - index);
@@ -1186,7 +1380,7 @@ function getSourceOrder(source) {
 
 function getSearchResultText(result) {
   // 6.13 拼接搜索结果可比较文本
-  return [result.title, result.fileName, result.extra].filter(Boolean).join(" ");
+  return [result.catalogCode, result.title, result.fileName, result.extra].filter(Boolean).join(" ");
 }
 
 function attachQualityScore(result, context) {
@@ -1210,6 +1404,9 @@ function attachQualityScore(result, context) {
     searchQuery: context.query,
     requestedEpisode: context.requestedEpisode,
     releaseName: context.releaseName,
+    catalogCode: result.catalogCode || quality.catalogCode || "",
+    requestedCatalogCode: context.catalogIdentity?.canonicalCode || "",
+    videoDurationMs: Number(context.videoDurationMs || 0),
   };
   logger.info("补齐统一质量评分完成", ranked.qualityScore);
   return ranked;
@@ -1517,7 +1714,7 @@ function pruneSubtitlePayloadCache() {
   }
 }
 
-async function searchThunder(query, limit) {
+export async function searchThunder(query, limit, request = fetchWithTimeout) {
   /*
    * ================================================================================
    * 步骤6：查询迅雷字幕源
@@ -1530,13 +1727,17 @@ async function searchThunder(query, limit) {
 
   // 6.1 请求接口
   const apiUrl = `https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=${encodeURIComponent(query)}`;
-  const response = await fetchWithTimeout(apiUrl, { headers: browserHeaders });
+  const response = await request(apiUrl, { headers: browserHeaders });
   const json = await response.json();
+  if (json?.code !== 0 || json?.result !== "ok") {
+    throw new Error(`Thunder API error: code=${json?.code}, result=${json?.result}`);
+  }
 
   // 6.2 转换结果
   const list = Array.isArray(json?.data) ? json.data : [];
   const results = list.slice(0, limit).map((item) => {
     const title = repairMojibakeText(item.name || query);
+    const durationMs = Number(item.duration || 0);
     return {
       source: "thunder",
       sourceLabel: "迅雷字幕",
@@ -1547,7 +1748,8 @@ async function searchThunder(query, limit) {
       score: Number(item.score || item.fingerprintf_score || 0),
       downloads: "",
       size: "",
-      duration: formatDuration(Number(item.duration || 0)),
+      durationMs: Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 0,
+      duration: formatDuration(durationMs),
       extra: repairMojibakeText(item.extra_name || ""),
       downloadUrl: item.url,
       detailUrl: item.url,
@@ -1993,7 +2195,7 @@ function subHdLanguageMatches(value, requestedLanguage) {
   return true;
 }
 
-async function searchSubtitleCat(query, language, limit) {
+export async function searchSubtitleCat(query, language, limit, request = fetchWithTimeout) {
   /*
    * ================================================================================
    * 步骤7：查询 SubtitleCat
@@ -2006,7 +2208,7 @@ async function searchSubtitleCat(query, language, limit) {
 
   // 7.1 请求搜索页
   const searchUrl = `https://subtitlecat.com/index.php?search=${encodeURIComponent(query)}`;
-  const response = await fetchWithTimeout(searchUrl, { headers: browserHeaders });
+  const response = await request(searchUrl, { headers: browserHeaders });
   const html = await response.text();
 
   // 7.2 解析搜索结果
@@ -2688,9 +2890,13 @@ async function searchAvSubtitles(query, language, limit) {
     return [];
   }
 
-  // 16.2 按编号变体请求搜索页
-  const catalogCode = extractCatalogCode(query);
-  const searchTerms = buildCatalogCodeSearchTerms(query);
+  // 16.2 按标准番号变体请求搜索页。
+  const catalogIdentity = extractAvIdentity(query);
+  if (!catalogIdentity) {
+    logger.info("查询 AVSubtitles 字幕源完成: 缺少编号");
+    return [];
+  }
+  const searchTerms = buildAvSearchTerms(catalogIdentity);
   const movieMap = new Map();
   let lastSearchUrl = `${AV_SUBTITLES_BASE_URL}/search`;
   for (const searchTerm of searchTerms) {
@@ -2699,7 +2905,7 @@ async function searchAvSubtitles(query, language, limit) {
       headers: { ...browserHeaders, referer: `${AV_SUBTITLES_BASE_URL}/search` },
     });
     const html = await response.text();
-    const movies = parseAvSubtitlesSearchResults(html, query, limit, catalogCode);
+    const movies = parseAvSubtitlesSearchResults(html, catalogIdentity, limit);
     for (const movie of movies) {
       if (!movieMap.has(movie.detailUrl)) {
         movieMap.set(movie.detailUrl, movie);
@@ -2737,7 +2943,7 @@ function getAvSubtitlesLanguageCode(language) {
   );
 }
 
-function parseAvSubtitlesSearchResults(html, query, limit, catalogCode = "") {
+export function parseAvSubtitlesSearchResults(html, catalogIdentity, limit) {
   /*
    * ================================================================================
    * 步骤17：解析 AVSubtitles 搜索结果
@@ -2749,15 +2955,14 @@ function parseAvSubtitlesSearchResults(html, query, limit, catalogCode = "") {
   logger.info("开始解析 AVSubtitles 搜索结果...");
 
   // 17.1 提取搜索结果链接
-  const code = catalogCode || extractCatalogCode(query);
   const unique = new Map();
   for (const match of String(html || "").matchAll(/<a\b[^>]*href=["']([^"']*\/movie\d+\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     const href = htmlDecode(match[1]);
     const title = htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim();
     if (!title) continue;
-    if (code && !normalizeCatalogCode(title).includes(code)) continue;
+    if (!sameAvIdentity(extractAvIdentity(title, { allowLooseCode: true }), catalogIdentity)) continue;
     const detailUrl = new URL(href, AV_SUBTITLES_BASE_URL).href;
-    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl, catalogCode: catalogIdentity.canonicalCode });
     if (unique.size >= limit) break;
   }
 
@@ -2794,6 +2999,7 @@ function parseAvSubtitlesDetail(html, movie, languageCode) {
       downloads: "",
       size: "",
       duration: "",
+      catalogCode: movie.catalogCode || "",
       extra: label || "Info / Download",
       downloadUrl: "",
       detailUrl,
@@ -2821,14 +3027,14 @@ async function searchAiyi(query, language, limit) {
     return [];
   }
 
-  // 19.2 搜索并严格过滤编号
-  const code = extractCatalogCode(query);
-  if (!code) {
+  // 19.2 搜索并严格过滤标准番号。
+  const catalogIdentity = extractAvIdentity(query);
+  if (!catalogIdentity) {
     logger.info("查询爱译网字幕源完成: 缺少编号");
     return [];
   }
-  const searchTerms = buildCatalogCodeSearchTerms(query);
-  let searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(formatCatalogCode(code, "-"))}`;
+  const searchTerms = buildAvSearchTerms(catalogIdentity);
+  let searchUrl = `${AIYI_BASE_URL}/?s=${encodeURIComponent(catalogIdentity.canonicalCode)}`;
   let posts = [];
   for (const searchTerm of searchTerms) {
     const apiUrl = new URL("/wp-json/wp/v2/search", AIYI_BASE_URL);
@@ -2841,7 +3047,7 @@ async function searchAiyi(query, language, limit) {
         headers: { ...browserHeaders, accept: "application/json,text/plain,*/*", referer: AIYI_BASE_URL },
       });
       const payload = await response.json();
-      posts = parseAiyiSearchApiResults(payload, code, limit);
+      posts = parseAiyiSearchApiResults(payload, catalogIdentity, limit);
       searchUrl = apiUrl.href;
       if (posts.length) break;
     } catch (error) {
@@ -2857,7 +3063,7 @@ async function searchAiyi(query, language, limit) {
         headers: { ...browserHeaders, referer: AIYI_BASE_URL },
       });
       const html = await response.text();
-      posts = parseAiyiSearchResults(html, code, limit);
+      posts = parseAiyiSearchResults(html, catalogIdentity, limit);
       if (posts.length) break;
     }
   }
@@ -2869,7 +3075,7 @@ async function searchAiyi(query, language, limit) {
       headers: { ...browserHeaders, referer: searchUrl },
     });
     const detailHtml = await detailResponse.text();
-    const parsed = parseAiyiDetail(detailHtml, post, code);
+    const parsed = parseAiyiDetail(detailHtml, post, catalogIdentity);
     if (parsed) results.push(parsed);
     if (results.length >= limit) break;
   }
@@ -2878,7 +3084,7 @@ async function searchAiyi(query, language, limit) {
   return results;
 }
 
-function parseAiyiSearchApiResults(items, code, limit) {
+export function parseAiyiSearchApiResults(items, catalogIdentity, limit) {
   /*
    * ================================================================================
    * 步骤20：解析爱译网接口搜索结果
@@ -2894,9 +3100,8 @@ function parseAiyiSearchApiResults(items, code, limit) {
   for (const item of Array.isArray(items) ? items : []) {
     const title = htmlDecode(String(item?.title || "")).replace(/\s+/g, " ").trim();
     const detailUrl = String(item?.url || "").trim();
-    const comparable = normalizeCatalogCode(`${title} ${detailUrl}`);
-    if (!detailUrl || !comparable.includes(code)) continue;
-    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (!detailUrl || !sameAvIdentity(extractAvIdentity(`${title} ${detailUrl}`, { allowLooseCode: true }), catalogIdentity)) continue;
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl, catalogCode: catalogIdentity.canonicalCode });
     if (unique.size >= limit) break;
   }
 
@@ -2904,7 +3109,7 @@ function parseAiyiSearchApiResults(items, code, limit) {
   return [...unique.values()];
 }
 
-function parseAiyiSearchResults(html, code, limit) {
+export function parseAiyiSearchResults(html, catalogIdentity, limit) {
   /*
    * ================================================================================
    * 步骤20：解析爱译网搜索结果
@@ -2920,9 +3125,8 @@ function parseAiyiSearchResults(html, code, limit) {
   for (const match of String(html || "").matchAll(/<a\b[^>]*href=["']([^"']*\/\d+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     const detailUrl = new URL(htmlDecode(match[1]), AIYI_BASE_URL).href;
     const title = htmlDecode(stripTags(match[2])).replace(/\s+/g, " ").trim();
-    const comparable = normalizeCatalogCode(`${title} ${detailUrl}`);
-    if (!comparable.includes(code)) continue;
-    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl });
+    if (!sameAvIdentity(extractAvIdentity(`${title} ${detailUrl}`, { allowLooseCode: true }), catalogIdentity)) continue;
+    if (!unique.has(detailUrl)) unique.set(detailUrl, { title, detailUrl, catalogCode: catalogIdentity.canonicalCode });
     if (unique.size >= limit) break;
   }
 
@@ -2930,7 +3134,7 @@ function parseAiyiSearchResults(html, code, limit) {
   return [...unique.values()];
 }
 
-function parseAiyiDetail(html, post, code) {
+function parseAiyiDetail(html, post, catalogIdentity) {
   /*
    * ================================================================================
    * 步骤21：解析爱译网文章详情
@@ -2952,7 +3156,7 @@ function parseAiyiDetail(html, post, code) {
   const title =
     htmlDecode(stripTags(matchFirst(html, /<h1\b[^>]*class=["'][^"']*post-title[^"']*["'][^>]*>([\s\S]*?)<\/h1>/i))).trim() ||
     post.title ||
-    code;
+    catalogIdentity.canonicalCode;
   const format = htmlDecode(matchFirst(html, /字幕格式[:：]\s*([^<]+)/i)).trim();
   const subtitleLanguage = htmlDecode(matchFirst(html, /字幕语种[:：]\s*([^<]+)/i)).trim() || "中文简体";
   const matchedVideo = htmlDecode(matchFirst(html, /匹配视频[:：]\s*([^<]+)/i)).trim();
@@ -2963,13 +3167,14 @@ function parseAiyiDetail(html, post, code) {
     source: "aiyi",
     sourceLabel: "爱译网",
     title,
-    fileName: sanitizeFileName(fileName || `${code}.srt`),
+    fileName: sanitizeFileName(fileName || `${catalogIdentity.canonicalCode}.srt`),
     ext: path.extname(fileName || downloadHref).replace(".", "") || "srt",
     language: subtitleLanguage,
     score: "",
     downloads: "",
     size: "",
     duration: "",
+    catalogCode: catalogIdentity.canonicalCode,
     extra: [format, matchedVideo].filter(Boolean).join(" · "),
     downloadUrl: new URL(htmlDecode(downloadHref), post.detailUrl).href,
     detailUrl: post.detailUrl,
@@ -2977,9 +3182,8 @@ function parseAiyiDetail(html, post, code) {
 }
 
 export function extractCatalogCode(value) {
-  // 21.3 提取编号样式代码
-  const match = String(value || "").match(/\b([A-Za-z]{2,8})[-_\s]?(\d{2,6})\b/);
-  return match ? `${match[1].toUpperCase()}${match[2]}` : "";
+  // 21.3 保留旧 API 返回紧凑编号，同时接入恢复文件和特殊系列。
+  return extractAvIdentity(value, { allowLooseCode: true })?.compactCode || "";
 }
 
 export function buildCatalogCodeSearchTerms(query) {
@@ -2993,21 +3197,11 @@ export function buildCatalogCodeSearchTerms(query) {
    */
   logger.info("开始生成编号检索词...");
 
-  // 21.1 组装多个站点更容易命中的编号写法
+  // 21.1 统一由番号身份模块生成标准、空格和紧凑写法。
   const normalized = String(query || "").replace(/\s+/g, " ").trim();
-  const code = extractCatalogCode(normalized);
-  const terms = [];
-  const addTerm = (value) => {
-    const item = String(value || "").replace(/\s+/g, " ").trim();
-    if (!item || terms.some((term) => term.toLowerCase() === item.toLowerCase())) return;
-    terms.push(item);
-  };
-
-  addTerm(formatCatalogCode(code, "-"));
-  addTerm(normalized);
-  addTerm(formatCatalogCode(code, " "));
-  addTerm(code);
-  if (!terms.length) addTerm(normalized);
+  const identity = extractAvIdentity(normalized, { allowLooseCode: true });
+  const terms = buildAvSearchTerms(identity);
+  if (!terms.length && normalized) terms.push(normalized);
 
   logger.info(`生成编号检索词完成: ${terms.join(" | ")}`);
   return terms;
@@ -3078,6 +3272,7 @@ async function fetchSubtitleBytes(result, language) {
     query: result.searchQuery,
     releaseName: result.releaseName || result.title,
     requestedEpisode: result.requestedEpisode,
+    catalogCode: result.requestedCatalogCode || result.catalogCode,
   });
   if (extracted) {
     logger.info(`拉取字幕字节完成: ${extracted.fileName}`);
@@ -3192,6 +3387,7 @@ async function fetchSubHdPayloadOnce(result, language) {
     query: result.searchQuery,
     releaseName: result.releaseName || result.title,
     requestedEpisode: result.requestedEpisode,
+    catalogCode: result.requestedCatalogCode || result.catalogCode,
   });
   const payload = extracted || { buffer, contentType, fileName };
 
@@ -3324,6 +3520,7 @@ async function fetchAssrtPayload(result, language) {
     query: result.searchQuery,
     releaseName: result.releaseName || result.title,
     requestedEpisode: result.requestedEpisode,
+    catalogCode: result.requestedCatalogCode || result.catalogCode,
   });
   const payload = extracted || { buffer, contentType, fileName };
   logger.info("拉取 ASSRT 字幕完成", payload.fileName);
@@ -3388,6 +3585,7 @@ async function fetchAvSubtitlesPayload(result, language) {
     query: result.searchQuery,
     releaseName: result.releaseName || result.title,
     requestedEpisode: result.requestedEpisode,
+    catalogCode: result.requestedCatalogCode || result.catalogCode,
   });
   logger.info("拉取 AVSubtitles 字幕完成", fileName);
   return extracted || { buffer, contentType, fileName };
@@ -3638,9 +3836,10 @@ export async function extractSubtitlePayload(buffer, contentType, fileName, lang
     : isRar
       ? await readRarEntries(buffer, archiveContext)
       : await readSevenZipEntries(buffer, archiveContext);
-  const entries = archiveEntries
-    .filter((entry) => SUBTITLE_EXTENSIONS.includes(path.extname(entry.fileName).toLowerCase()))
-    .sort((left, right) => scoreArchiveSubtitle(right.fileName, archiveContext) - scoreArchiveSubtitle(left.fileName, archiveContext));
+  const entries = rankArchiveSubtitleEntries(
+    archiveEntries.filter((entry) => SUBTITLE_EXTENSIONS.includes(path.extname(entry.fileName).toLowerCase())),
+    archiveContext
+  );
   if (!entries.length) {
     logger.info("解包压缩字幕完成: 未找到字幕");
     return null;
@@ -3691,8 +3890,7 @@ function readZipEntries(buffer, context = {}) {
   }
 
   // 12.4.1 只解压评分最高的候选字幕
-  const selected = candidates
-    .sort((left, right) => scoreArchiveSubtitle(right.fileName, context) - scoreArchiveSubtitle(left.fileName, context))[0];
+  const selected = rankArchiveSubtitleEntries(candidates, context)[0];
   if (!selected) return [];
   const content = readZipEntryContent(buffer, selected.localHeaderOffset, selected.compressedSize, selected.method);
   return content ? [{ fileName: selected.fileName, buffer: content }] : [];
@@ -3764,17 +3962,17 @@ async function readRarEntries(buffer, context) {
   const wasmBinary = await getUnrarWasmBinary();
   const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
   const extractor = await unrar.createExtractorFromData({ data: arrayBuffer, wasmBinary });
-  const headers = [...extractor.getFileList().fileHeaders]
+  const headers = rankArchiveSubtitleEntries([...extractor.getFileList().fileHeaders]
     .filter((header) => !header.flags?.directory && !header.flags?.encrypted && Number(header.unpSize || 0) <= 20 * 1024 * 1024)
     .filter((header) => SUBTITLE_EXTENSIONS.includes(path.extname(header.name || "").toLowerCase()))
-    .sort((left, right) => scoreArchiveSubtitle(right.name, context) - scoreArchiveSubtitle(left.name, context));
+    .map((header) => ({ ...header, fileName: header.name })), context);
   if (!headers.length) {
     logger.info("读取 RAR 字幕完成: 未找到字幕");
     return [];
   }
 
   // 12.8.2 只解压最高分文件并遍历迭代器释放资源
-  const selectedName = headers[0].name;
+  const selectedName = headers[0].fileName;
   const extracted = extractor.extract({ files: [selectedName] });
   const entries = [];
   for (const file of extracted.files) {
@@ -3825,10 +4023,9 @@ async function readSevenZipEntries(buffer, context) {
   } catch (error) {
     if (!String(error?.message || error).includes("Program terminated with exit(0)")) throw error;
   }
-  const selected = parseSevenZipListing(listing.join("\n"))
+  const selected = rankArchiveSubtitleEntries(parseSevenZipListing(listing.join("\n"))
     .filter((entry) => SUBTITLE_EXTENSIONS.includes(path.extname(entry.fileName).toLowerCase()))
-    .filter((entry) => !entry.encrypted && entry.size <= 20 * 1024 * 1024)
-    .sort((left, right) => scoreArchiveSubtitle(right.fileName, context) - scoreArchiveSubtitle(left.fileName, context))[0];
+    .filter((entry) => !entry.encrypted && entry.size <= 20 * 1024 * 1024), context)[0];
   if (!selected) {
     logger.info("读取 7z 字幕完成: 未找到字幕");
     return [];
@@ -3909,6 +4106,134 @@ function getSubtitleContentType(fileName) {
   return "application/octet-stream";
 }
 
+/*
+ * ================================================================================
+ * 步骤12.10.1：筛选压缩包字幕候选
+ * ================================================================================
+ * 目标：
+ * 1) 先排除编号明确不匹配的字幕文件
+ * 2) 再按语言、集数和发布版本选出最高分文件
+ * 数据源：ZIP、RAR 和 7z 的已校验字幕文件目录
+ * 操作要点：负无穷分表示身份冲突，不能参与后续排序
+ */
+function rankArchiveSubtitleEntries(entries, context = {}) {
+  logger.info("开始筛选压缩包字幕候选...");
+
+  // 12.10.1.1 计算统一分值，并删除明确错误番号。
+  const result = (Array.isArray(entries) ? entries : [])
+    .map((entry) => ({ entry, score: scoreArchiveSubtitle(entry?.fileName || entry?.name || "", context) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((left, right) => right.score - left.score)
+    .map((item) => item.entry);
+
+  logger.info("筛选压缩包字幕候选完成", result.length);
+  return result;
+}
+
+function getCatalogIdentityRank(result, catalogIdentity) {
+  if (!catalogIdentity) return 0;
+  if (result.fingerprintMatch) return 3;
+  const catalogState = inspectResultCatalogIdentity(result, catalogIdentity);
+  if (catalogState.mismatch) return 0;
+  return catalogState.match ? 2 : 1;
+}
+
+function compareCatalogIdentity(left, right, catalogIdentity) {
+  const leftRank = getCatalogIdentityRank(left, catalogIdentity);
+  const rightRank = getCatalogIdentityRank(right, catalogIdentity);
+  return rightRank - leftRank;
+}
+
+function getCatalogDurationDelta(result, catalogIdentity, videoDurationMs) {
+  if (!catalogIdentity || !videoDurationMs) return Number.POSITIVE_INFINITY;
+  const candidateDurationMs = parseResultDurationMs(result.durationMs || result.duration);
+  return candidateDurationMs > 0 ? Math.abs(candidateDurationMs - videoDurationMs) : Number.POSITIVE_INFINITY;
+}
+
+function compareCatalogDuration(left, right, catalogIdentity, videoDurationMs) {
+  const leftDelta = getCatalogDurationDelta(left, catalogIdentity, videoDurationMs);
+  const rightDelta = getCatalogDurationDelta(right, catalogIdentity, videoDurationMs);
+  return leftDelta - rightDelta;
+}
+
+function parseResultDurationMs(value) {
+  if (Number.isFinite(Number(value)) && Number(value) > 0) return Number(value);
+  const match = String(value || "").match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  return (Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3])) * 1000;
+}
+
+/*
+ * ================================================================================
+ * 步骤7.05：按番号身份过滤结果
+ * ================================================================================
+ * 目标：
+ * 1) 番号模式拒绝能提取出其他标准码的候选
+ * 2) 保留指纹命中和没有可提取号码的通用来源结果
+ */
+function filterResultsByCatalogIdentity(results, catalogIdentity, sourceItem = null, details = {}) {
+  logger.info("开始按番号身份过滤结果...");
+
+  // 7.05.1 非番号搜索不改变来源结果。
+  if (!catalogIdentity) {
+    logger.info("按番号身份过滤结果完成: 不适用");
+    return Array.isArray(results) ? results : [];
+  }
+
+  // 7.05.2 记录候选自身番号，任一字段冲突都不能进入语言和来源评分。
+  const filtered = [];
+  for (const result of Array.isArray(results) ? results : []) {
+    const catalogState = inspectResultCatalogIdentity(result, catalogIdentity);
+    if (catalogState.mismatch) {
+      result.catalogMatch = false;
+      result.catalogMismatchReason = `编号不一致: ${catalogState.mismatch.canonicalCode}`;
+      details.catalogMismatchCount = Number(details.catalogMismatchCount || 0) + 1;
+      continue;
+    }
+    if (!catalogState.match && sourceItem?.strictCatalogIdentity && !result.fingerprintMatch) {
+      result.catalogMatch = false;
+      result.catalogMismatchReason = "未识别候选番号";
+      details.catalogUnknownCount = Number(details.catalogUnknownCount || 0) + 1;
+      continue;
+    }
+    result.catalogMatch = Boolean(catalogState.match);
+    result.catalogCode = catalogState.match?.canonicalCode || result.catalogCode || "";
+    filtered.push(result);
+  }
+
+  logger.info("按番号身份过滤结果完成", filtered.length);
+  return filtered;
+}
+
+function inspectResultCatalogIdentity(result, catalogIdentity) {
+  /*
+   * ================================================================================
+   * 步骤7.05.3：核对候选各字段的番号身份
+   * ================================================================================
+   * 目标：
+   * 1) 同时检查来源元数据、标题、文件名和附加说明
+   * 2) 任一字段出现不同番号时，不能被前置元数据掩盖
+   * 数据源：统一搜索结果的 catalogCode、title、fileName、extra
+   */
+  logger.info("开始核对候选各字段的番号身份...");
+
+  // 7.05.3.1 分字段提取，保留标准码去重后的候选集合。
+  const identities = [];
+  for (const value of [result?.catalogCode, result?.title, result?.fileName, result?.extra]) {
+    const identity = extractAvIdentity(value, { allowLooseCode: Boolean(catalogIdentity) });
+    if (!identity || identities.some((item) => sameAvIdentity(item, identity))) continue;
+    identities.push(identity);
+  }
+
+  // 7.05.3.2 精确匹配和冲突同时出现时以冲突为准。
+  const match = identities.find((identity) => sameAvIdentity(identity, catalogIdentity)) || null;
+  const mismatch = identities.find((identity) => !sameAvIdentity(identity, catalogIdentity)) || null;
+  const response = { match, mismatch };
+
+  logger.info("核对候选各字段的番号身份完成", mismatch ? "mismatch" : match ? "match" : "unknown");
+  return response;
+}
+
 function cacheResult(result) {
   // 3.4 缓存结果供预览和下载接口复用
   const key = `${result.source}|${result.title}|${result.detailUrl}|${result.downloadUrl}|${result.language}|${result.fileName}`;
@@ -3935,6 +4260,11 @@ function toPublicResult(result) {
     score: result.score,
     qualityScore: result.qualityScore,
     languageProfile: result.languageProfile,
+    qualityReasons: result.qualityReasons,
+    catalogCode: result.catalogCode,
+    requestedCatalogCode: result.requestedCatalogCode,
+    catalogMatch: result.catalogMatch,
+    durationDeltaMs: result.durationDeltaMs,
     downloads: result.downloads,
     size: result.size,
     duration: result.duration,

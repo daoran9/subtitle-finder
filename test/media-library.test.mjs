@@ -25,6 +25,14 @@ test("解析电影年份并移除发布参数", () => {
   assert.equal(media.query, "Dune 2021");
 });
 
+// 1.1.1 片名和年份使用横线时也不能误进入番号分支。
+test("普通电影横线年份不进入番号分支", () => {
+  const media = analyzeMediaFile("Dune-2021.2160p.BluRay.mkv");
+  assert.equal(media.mediaType, "movie");
+  assert.equal(media.catalogCode, "");
+  assert.equal(media.query, "Dune 2021");
+});
+
 // 1.2 解析标准季集号和多集文件
 test("解析标准季集号和连续集", () => {
   const media = analyzeMediaFile("Daria.S01E02-E03.1080p.WEB-DL.mkv", { parentNames: ["Season 1", "Daria (1997)"] });
@@ -49,6 +57,15 @@ test("只有季集号时不生成重复搜索词", () => {
   const media = analyzeMediaFile("S01E01.mkv", { parentNames: ["Season 1"] });
   assert.equal(media.title, "");
   assert.equal(media.query, "S01E01");
+});
+
+// 1.5 番号恢复文件优先进入独立身份分支
+test("恢复文件保留标准番号并以编号作为搜索词", () => {
+  const media = analyzeMediaFile("390JAC-089.restored.mp4");
+  assert.equal(media.mediaType, "av");
+  assert.equal(media.catalogCode, "JAC-089");
+  assert.equal(media.catalogKey, "JAC089");
+  assert.equal(media.query, "JAC-089");
 });
 
 /*
@@ -89,7 +106,16 @@ test("已有字幕核对电影年份", () => {
   assert.deepEqual(subtitles, ["Dune.2021.zh-CN.srt"]);
 });
 
-// 2.4 缺字幕优先并保持集号顺序
+// 2.4 同目录中相似番号不能被当作已有字幕
+test("已有字幕按标准番号排除相邻番号", () => {
+  const subtitles = findExistingSubtitles(
+    "390JAC-089.restored.mp4",
+    ["JAC-089.zh-CN.srt", "JAC-0890.zh-CN.srt", "JAC-090.zh-CN.srt"]
+  );
+  assert.deepEqual(subtitles, ["JAC-089.zh-CN.srt"]);
+});
+
+// 2.5 缺字幕优先并保持集号顺序
 test("扫描结果按缺失状态和集号排序", () => {
   const entries = [
     { title: "Daria", season: 1, episode: 3, hasSubtitle: false, path: "03.mkv" },

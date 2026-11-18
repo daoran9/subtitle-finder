@@ -49,6 +49,16 @@ test("同集同发布版本结果优先", () => {
   assert.ok(matched.qualityReasons.includes("版本匹配"));
 });
 
+// 1.4 来源已提供标准番号时，也必须参与身份评分。
+test("结果标准番号参与候选身份评分", () => {
+  const quality = scoreSubtitleCandidate(
+    { source: "avsubtitles", catalogCode: "JAC-089", title: "中文字幕", fileName: "subtitle.srt" },
+    { catalogCode: "JAC-089", language: "zh-CN" }
+  );
+  assert.equal(quality.catalogMatch, true);
+  assert.ok(quality.qualityReasons.includes("番号匹配"));
+});
+
 logger.info("验证统一字幕质量分完成");
 
 /*
@@ -107,6 +117,30 @@ test("ZIP 自动解出目标集字幕", async () => {
   });
   assert.equal(selected.fileName, "Daria.S01E02.1080p.WEB-DL.chs.srt");
   assert.equal(selected.buffer.toString("utf8"), "episode two");
+});
+
+// 3.2.1 番号压缩包必须优先精确码，不能选相邻号码。
+test("ZIP 自动排除相邻番号字幕", async () => {
+  const zip = createStoredZip([
+    { name: "JAC-0890.zh.srt", content: "wrong subtitle" },
+    { name: "JAC-089.zh.srt", content: "right subtitle" },
+  ]);
+  const selected = await extractSubtitlePayload(zip, "application/zip", "JAC-089.zip", "zh-CN", {
+    query: "JAC-089",
+    catalogCode: "JAC-089",
+  });
+  assert.equal(selected.fileName, "JAC-089.zh.srt");
+  assert.equal(selected.buffer.toString("utf8"), "right subtitle");
+});
+
+// 3.2.2 压缩包只有错误号码时应拒绝，不回退成任意字幕。
+test("ZIP 只有错误番号字幕时不返回文件", async () => {
+  const zip = createStoredZip([{ name: "JAC-0890.zh.srt", content: "wrong subtitle" }]);
+  const selected = await extractSubtitlePayload(zip, "application/zip", "JAC-089.zip", "zh-CN", {
+    query: "JAC-089",
+    catalogCode: "JAC-089",
+  });
+  assert.equal(selected, null);
 });
 
 // 3.3 下载 RAR 后自动解出最高分字幕

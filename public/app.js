@@ -2,6 +2,7 @@ import { analyzeMediaFile, compareMediaEntries, findExistingSubtitles } from "./
 import { analyzeSubtitleLanguage, buildSubtitleBaseName } from "./subtitle-rules.js";
 import { parseCustomConversionDictionary } from "./conversion-dictionary.js";
 import { parseScanExclusionRules } from "./scan-rules.js";
+import { initDrive115 } from "./drive115.js";
 
 const state = {
   results: [],
@@ -19,6 +20,7 @@ const state = {
   videoDirectoryLabel: "",
   videoDirectoryId: "",
   hideMatchedVideos: true,
+  matchVideoName: true,
   namingPreset: "media-server",
   batchConcurrency: 2,
   assrtToken: "",
@@ -76,6 +78,7 @@ const nodes = {
   syncProgress: document.querySelector("#syncProgress"),
   syncStatus: document.querySelector("#syncStatus"),
   previewFeedback: document.querySelector("#previewFeedback"),
+  matchVideoName: document.querySelector("#matchVideoName"),
   downloadButton: document.querySelector("#downloadButton"),
   conversionSelect: document.querySelector("#conversionSelect"),
   batchDownloadButton: document.querySelector("#batchDownloadButton"),
@@ -110,6 +113,24 @@ const nodes = {
   clearRecentButton: document.querySelector("#clearRecentButton"),
 };
 
+const drive115UI = initDrive115({
+  apiUrl,
+  shouldMatchVideoName: () => state.matchVideoName,
+  onSelect(video) {
+    clearActiveVideoSelection();
+    nodes.query.value = video.query;
+    renderClearQueryButton();
+    void searchSubtitles();
+  },
+  getSubtitle() {
+    if (!state.downloadUrl || !state.selectedId) return null;
+    const params = new URL(state.downloadUrl, window.location.href).searchParams;
+    return { id: state.selectedId, fileName: state.downloadFileName,
+      language: params.get("lang") || "zh-CN", conversion: params.get("convert") || "" };
+  },
+  feedback: showPreviewFeedback,
+});
+
 /*
  * ================================================================================
  * 步骤1：初始化前端页面
@@ -137,6 +158,7 @@ nodes.clearQueryButton.addEventListener("click", () => {
 });
 
 nodes.query.addEventListener("input", () => {
+  if (drive115UI.video && nodes.query.value.trim() !== drive115UI.video.query) drive115UI.clearTarget();
   const activeVideo = getActiveVideo();
   if (activeVideo && nodes.query.value.trim() !== activeVideo.query) {
     clearActiveVideoSelection();
@@ -154,20 +176,7 @@ nodes.closeSettingsButton.addEventListener("click", () => {
   closeSettingsDialog();
 });
 
-nodes.closeSettingsButton.addEventListener("pointerdown", (event) => {
-  event.stopPropagation();
-});
-
-nodes.settingsModal.addEventListener("pointerup", (event) => {
-  const closeButton = event.target instanceof Element ? event.target.closest("[data-settings-close]") : null;
-  if (closeButton) closeSettingsDialog();
-});
-
 nodes.settingsModal.addEventListener("click", (event) => {
-  if (event.target instanceof Element && event.target.closest("[data-settings-close]")) {
-    closeSettingsDialog();
-    return;
-  }
   if (event.target === nodes.settingsModal) closeSettingsDialog();
 });
 
@@ -378,6 +387,7 @@ async function searchSubtitles() {
 
   // 2.2 读取搜索条件
   const query = nodes.query.value.trim();
+  if (drive115UI.video && query !== drive115UI.video.query) drive115UI.clearTarget();
   const source = nodes.source.value;
   const language = nodes.language.value;
   if (!query) {
@@ -399,7 +409,7 @@ async function searchSubtitles() {
   clearPreview();
 
   try {
-    const activeVideo = getActiveVideo();
+    const activeVideo = getActiveVideo() || drive115UI.video;
     if ((source === "shooter" || source === "thunder-fingerprint") && !activeVideo) {
       throw new Error("该字幕源需要先从视频文件夹选择一个本地视频");
     }
@@ -485,6 +495,10 @@ function buildSearchRequest({ query, source, language, limit, video = null, vide
     if (videoInfo.thunderCid) params.set("thunderCid", videoInfo.thunderCid);
     params.set("videoFileName", video.name || "video.mkv");
     params.set("releaseName", video.name || query || "video.mkv");
+    if (video.catalogCode) params.set("catalogCode", video.catalogCode);
+    if (Number(videoInfo.videoDurationMs || video.videoDurationMs) > 0) {
+      params.set("videoDurationMs", String(Number(videoInfo.videoDurationMs || video.videoDurationMs)));
+    }
     for (const alias of Array.isArray(video.searchAliases) ? video.searchAliases.slice(0, 8) : []) {
       params.append("alias", alias);
     }
@@ -709,11 +723,14 @@ function renderSourceStats(stats) {
         : hasMatchedValue && matchedValue !== countValue
           ? `${escapeHtml(String(countValue))} 条原始 · ${escapeHtml(String(matchedValue))} 条命中`
           : `${escapeHtml(String(countValue))} 条`;
+      const metaText = item.status === "skipped"
+        ? countText
+        : [countText, escapeHtml(item.duration || "-"), item.message ? escapeHtml(item.message) : ""].filter(Boolean).join(" · ");
       return `
         <div class="source-stat" data-status="${escapeHtml(item.status || "done")}"${message}>
           <span>${escapeHtml(item.sourceLabel || item.source || "-")}</span>
           <b>${escapeHtml(item.statusLabel || "-")}</b>
-          <small>${countText} · ${escapeHtml(item.duration || "-")}</small>
+          <small>${metaText}</small>
         </div>
       `;
     })
@@ -774,6 +791,7 @@ function clearSearchQuery() {
 
   // 5.1 清空输入并恢复焦点
   nodes.query.value = "";
+  drive115UI.clearTarget();
   clearActiveVideoSelection();
   nodes.query.focus();
   renderClearQueryButton();
@@ -807,9 +825,10 @@ async function openSettingsDialog() {
   state.settingsFocusReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   nodes.settingsMessage.textContent = "";
   await settingsReadyPromise;
+  nodes.matchVideoName.checked = state.matchVideoName;
   nodes.scanExclusionRules.value = state.scanExclusionRules.join("\n");
   nodes.customDictionary.value = state.customDictionary;
-  nodes.settingsPlatformLabel.textContent = window.subtitleFinder.platform === "android" ? "Android 扫描与转换" : "Windows 扫描与转换";
+  nodes.settingsPlatformLabel.textContent = window.subtitleFinder.platform === "android" ? "Android 扫描、转换与保存" : "Windows 扫描、转换与保存";
   nodes.contextMenuSetting.hidden = !window.subtitleFinder.getContextMenuState;
   if (window.subtitleFinder.getContextMenuState) {
     try {
@@ -823,7 +842,7 @@ async function openSettingsDialog() {
   nodes.settingsModal.hidden = false;
   nodes.settingsModal.removeAttribute("aria-hidden");
   document.body.classList.add("modal-open");
-  nodes.scanExclusionRules.focus();
+  nodes.matchVideoName.focus();
 
   logger.info("打开设置弹窗完成");
 }
@@ -877,6 +896,7 @@ async function saveSettings() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         settings: {
+          matchVideoName: nodes.matchVideoName.checked,
           scanExclusionRules,
           customDictionary: nodes.customDictionary.value,
         },
@@ -884,8 +904,10 @@ async function saveSettings() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "设置保存失败");
+    state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
     state.customDictionary = String(data.settings?.customDictionary || "");
+    drive115UI.render();
 
     // 6.4.3 Windows 保存右键菜单状态
     if (window.subtitleFinder?.setContextMenuState) {
@@ -1538,9 +1560,9 @@ function buildPreferredSubtitleBaseName(result = null) {
   logger.info("开始生成媒体库字幕主文件名...");
 
   // 6.6.1 读取当前视频和语言
-  const video = getActiveVideo();
-  if (!video) {
-    logger.info("生成媒体库字幕主文件名完成: manual search");
+  const video = getActiveVideo() || drive115UI.video;
+  if (!video || !state.matchVideoName) {
+    logger.info("生成媒体库字幕主文件名完成: 使用字幕文件名");
     return "";
   }
   const effectiveLanguage = state.conversionTarget || nodes.language.value;
@@ -1553,7 +1575,7 @@ function buildPreferredSubtitleBaseName(result = null) {
     }
     : result?.languageProfile || {};
   const preferredName = buildSubtitleBaseName(video.name, {
-    preset: state.namingPreset,
+    preset: video.remote115 ? "same-name" : state.namingPreset,
     language: effectiveLanguage,
     source: result?.source || "subtitle",
     languageProfile: convertedProfile,
@@ -1758,6 +1780,7 @@ async function loadVideoSelectionResult(result, options = {}) {
   }
 
   // 7.3.2 写入视频状态并选中目标
+  drive115UI.clearTarget();
   state.batchStateTouched = true;
   state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
   state.videoDirectoryLabel = String(result.label || result.directory || "");
@@ -1888,6 +1911,7 @@ function renderVideoFiles() {
   nodes.videoList.querySelectorAll("[data-video-index]").forEach((button) => {
     button.addEventListener("click", () => {
       const item = state.videoFiles[Number(button.dataset.videoIndex)];
+      drive115UI.clearTarget();
       state.activeVideoPath = (item && item.path) || "";
       nodes.videoList.querySelectorAll(".video-file-button").forEach((videoButton) => {
         videoButton.classList.toggle("is-active", videoButton === button);
@@ -2071,8 +2095,10 @@ async function restoreAppSettings() {
     const response = await fetch(apiUrl("/api/settings"), { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "设置读取失败");
+    state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
     state.customDictionary = String(data.settings?.customDictionary || "");
+    drive115UI.render();
     logger.info("恢复通用设置完成", state.scanExclusionRules.length);
   } catch (error) {
     state.scanExclusionRules = [];
@@ -2170,7 +2196,8 @@ async function waitForLocalService() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
       const response = await fetch(apiUrl("/api/health"), { cache: "no-store" });
-      if (response.ok) {
+      // Capacitor 在 Node 启动前会给未知路径返回 200 HTML，不能只看状态码。
+      if (response.ok && (await response.json()).ok === true) {
         logger.info("等待本地服务完成: ready");
         return true;
       }
@@ -2271,6 +2298,7 @@ async function savePersistentBatchState(options = {}) {
 }
 
 async function inspectVideoForSearch(video) {
+  if (video?.remote115) return { ok: false, error: "115 视频不读取本地指纹，请选择其他字幕源" };
   /*
    * ================================================================================
    * 步骤12：分析本地视频
@@ -2305,6 +2333,7 @@ function updateVideoInspectionState(video, inspection) {
     "shooterHash",
     "thunderCid",
     "fingerprintStatus",
+    "videoDurationMs",
     "embeddedSubtitleStatus",
     "embeddedSubtitleCount",
     "embeddedSubtitles",
@@ -2855,6 +2884,7 @@ function setDownloadButtonAvailable(available) {
   nodes.downloadButton.setAttribute("aria-disabled", enabled ? "false" : "true");
   nodes.downloadButton.disabled = !enabled;
   nodes.downloadButton.textContent = enabled ? "下载" : state.downloadSaving ? "保存中" : "下载";
+  drive115UI.render();
 
   logger.info("更新下载按钮可用状态完成", enabled ? "enabled" : "disabled");
 }
