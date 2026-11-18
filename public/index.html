@@ -19,7 +19,8 @@
             <div class="brand-mark" aria-hidden="true">S</div>
             <div>
               <h1>字幕检索台</h1>
-              <p>建议精准搜索 · v1.7.0</p>
+              <p>建议精准搜索 · v<span id="appVersion">1.7.1</span></p>
+              <div class="update-notice" role="status"><a id="updateLink" rel="noreferrer" hidden></a></div>
             </div>
           </div>
 
@@ -109,7 +110,7 @@
             </div>
             <div id="batchPanel" class="batch-panel" hidden>
               <div class="batch-settings">
-                <label>
+                <label id="batchNamingPreset">
                   命名
                   <select id="namingPresetSelect">
                     <option value="media-server">通用</option>
@@ -128,6 +129,7 @@
                   </select>
                 </label>
               </div>
+              <p id="cloudBatchNaming" class="muted" hidden></p>
               <div class="batch-actions">
                 <button id="startBatchButton" type="button">匹配字幕</button>
                 <button id="pauseBatchButton" type="button" disabled>暂停</button>
@@ -237,6 +239,22 @@
           <p id="drive115Message" role="status" aria-live="polite"></p>
           <div id="drive115Browser" hidden>
             <nav id="drive115Path" class="drive115-path" aria-label="115 目录"></nav>
+            <form id="drive115SearchForm" class="drive115-search">
+              <input id="drive115SearchInput" type="search" maxlength="120" placeholder="搜索当前目录及子目录" aria-label="搜索 115 文件或文件夹" required />
+              <button type="submit">搜索</button>
+              <button id="drive115ClearSearch" type="button" hidden>清除搜索</button>
+            </form>
+            <div class="drive115-controls">
+              <label>排序 <select id="drive115Sort">
+                <option value="name">名称</option>
+                <option value="time">添加时间</option>
+              </select></label>
+              <select id="drive115Direction" aria-label="排序方向">
+                <option value="asc">A → Z</option>
+                <option value="desc">Z → A</option>
+              </select>
+              <button id="drive115SelectFolder" type="button" disabled>选择当前文件夹</button>
+            </div>
             <div id="drive115Files" class="drive115-files" aria-label="115 文件列表"></div>
             <div class="drive115-pagination">
               <button id="drive115Previous" type="button" disabled>上一页</button><span id="drive115Page"></span>
@@ -253,7 +271,7 @@
         <header class="about-header">
           <div>
             <h2 id="aboutTitle">关于</h2>
-            <p>SubtitleFinder · v1.7.0</p>
+            <p>SubtitleFinder · v1.7.1</p>
           </div>
           <button
             id="closeAboutButton"
@@ -273,6 +291,8 @@
           <p>用途：仅限非商业使用。</p>
           <p>条款：<a href="https://polyformproject.org/licenses/noncommercial/1.0.0/" target="_blank" rel="noreferrer">polyformproject.org/licenses/noncommercial/1.0.0</a></p>
           <p><button id="thirdPartyLicensesButton" type="button" class="text-link-button">第三方组件与许可</button></p>
+          <p><button id="checkUpdatesButton" type="button" class="text-link-button">检查更新</button></p>
+          <p role="status"><span id="updateStatus"></span> <a id="aboutUpdateLink" rel="noreferrer" hidden>打开发布页</a></p>
         </div>
 
         <footer class="about-footer">

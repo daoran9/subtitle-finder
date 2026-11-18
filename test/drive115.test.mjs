@@ -13,7 +13,7 @@ const videoRow = { fid: "42", cid: "7", n: video.name, s: 900, sha: "VIDEO" };
 const APP_CODES = { web: "A1", ios: "D1", "115ios": "D3", android: "F1", "115ipad": "H3", tv: "I1", apple_tv: "I2", qios: "N1", os_windows: "P1", os_linux: "P3", wechatmini: "R1", alipaymini: "R2", harmony: "S1" };
 const QR_PLATFORMS = { web: /Windows NT/, ios: /\(iPhone;/, "115ios": /\(iPhone;/, android: /Android/, "115ipad": /\(iPad;/, tv: /Android/, apple_tv: /Apple TV.*tvOS/, qios: /\(iPhone;/, os_windows: /Windows NT/, os_linux: /X11; Linux/, wechatmini: /iPhone.*MicroMessenger/, alipaymini: /iPhone.*AlipayClient/, harmony: /HarmonyOS/ };
 
-function fixture({ failUpload = false, existing = false, changedVideo = false, host = "https://bucket.oss-cn-shenzhen.aliyuncs.com/", wrongReadback = false, returnedApp = null, savedName = "测试 JAC-090.1080p.srt" } = {}) {
+function fixture({ failUpload = false, existing = false, changedVideo = false, host = "https://bucket.oss-cn-shenzhen.aliyuncs.com/", wrongReadback = false, returnedApp = null, savedName = "测试 JAC-090.1080p.srt", directories } = {}) {
   const calls = [];
   let uploaded = false;
   const uploadedRow = { fid: "43", cid: "7", n: savedName, s: payload.buffer.length, sha: createHash("sha1").update(payload.buffer).digest("hex") };
@@ -31,9 +31,10 @@ function fixture({ failUpload = false, existing = false, changedVideo = false, h
     }
     else if (url.hostname === "my.115.com") value = { state: true, data: { user_id: "123", user_name: "测试账号" } };
     else if (url.pathname === "/files") {
-      const rows = [{ ...videoRow, n: changedVideo ? "renamed.mkv" : video.name }];
-      if (existing || uploaded) rows.push({ ...uploadedRow, sha: wrongReadback ? "WRONG" : uploadedRow.sha });
-      value = { state: true, offset: 0, count: rows.length, data: rows };
+      const offset = Number(url.searchParams.get("offset"));
+      const rows = directories ? directories[url.searchParams.get("cid")] : [{ ...videoRow, n: changedVideo ? "renamed.mkv" : video.name }];
+      if (!directories && (existing || uploaded)) rows.push({ ...uploadedRow, sha: wrongReadback ? "WRONG" : uploadedRow.sha });
+      value = { state: true, offset, count: rows.length, data: directories ? rows.slice(offset, offset + 2) : rows };
     } else if (url.hostname === "uplb.115.com") value = { host, object: "object", policy: "policy", accessid: "access", callback: "callback", signature: "signature" };
     else if (url.hostname.endsWith(".aliyuncs.com")) {
       if (failUpload) throw new Error("network failure with secret URL");
@@ -198,17 +199,111 @@ test("115 HTTP 接口限制外部来源、写入方法及输入，退出清空�
     const post = async (action, body) => fetch(`${url}/api/drive115/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     assert.equal((await fetch(`${url}/api/drive115/status`, { headers: { origin: "https://outside.example" } })).status, 403);
     assert.equal((await fetch(`${url}/api/drive115/logout`)).status, 405);
+    assert.equal((await fetch(`${url}/api/drive115/scan?parentId=7`)).status, 400);
     assert.equal((await fetch(`${url}/api/drive115/login`, { method: "POST", body: "app=ios" })).status, 415);
     const token = await (await post("login", { app: "harmony" })).json();
     assert.equal((await (await post("poll", token)).json()).status, "confirmed");
     const status = await (await fetch(`${url}/api/drive115/status`)).json();
     assert.equal(status.account.app, "harmony");
     assert.doesNotMatch(JSON.stringify(status), /COOKIE|SEID/);
+    const scan = await (await fetch(`${url}/api/drive115/scan?parentId=7&folderName=Series`)).json();
+    assert.equal(scan.files[0].parentId, "7");
+    assert.equal(scan.accountId, "123");
     assert.equal((await post("save", { resultId: "missing" })).status, 404);
     await post("logout", {});
     assert.equal((await (await fetch(`${url}/api/drive115/status`)).json()).account, null);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("115 文件夹分页递归扫描，只用同目录字幕判定并遵守扫描排除规则", async () => {
+  const { drive, login, calls } = fixture({ directories: {
+    7: [videoRow, { fid: "43", cid: "7", n: "JAC-090.zh.srt" },
+      { cid: "8", pid: "7", n: "Season 1" }, { cid: "9", pid: "7", n: "Extras" }],
+    8: [{ fid: "50", cid: "8", n: "01.mp4" },
+      { fid: "51", cid: "8", n: "02.mp4" }, { fid: "52", cid: "8", n: "02.srt" }],
+  } });
+  await login();
+  const scan = await drive.scanFolder("7", ["Extras"], "Series");
+  assert.deepEqual(scan.files.map(({ id, parentId, parentNames, existingSubtitles }) => [id, parentId, parentNames, existingSubtitles]), [
+    ["42", "7", ["Series"], ["JAC-090.zh.srt"]],
+    ["50", "8", ["Series", "Season 1"], []],
+    ["51", "8", ["Series", "Season 1"], ["02.srt"]],
+  ]);
+  assert.equal(scan.truncated, false);
+  assert.equal(calls.filter(({ url }) => url.pathname === "/files").length, 4);
+  await assert.rejects(drive.save(video, payload, true, "999"), /登录账号已变更/);
+});
+
+test("115 名称与添加时间升降序、搜索分页及跨目录结果保留真实父目录", async () => {
+  const { drive, login, fetcher } = fixture();
+  await login();
+  const folderPath = [{ cid: "0", name: "根目录" }, { cid: "7", name: "Series" }];
+  const orders = [
+    ["name-asc", "file_name", "1"], ["name-desc", "file_name", "0"],
+    ["oldest", "user_ptime", "1"], ["newest", "user_ptime", "0"],
+  ];
+  const requests = [];
+  drive.fetcher = async (address, options) => {
+    const url = new URL(address);
+    if (url.pathname === "/files") {
+      requests.push(url.searchParams);
+      return Response.json({ state: true, offset: 0, count: 1, data: [videoRow], path: folderPath });
+    }
+    if (url.pathname === "/files/search") {
+      const offset = Number(url.searchParams.get("offset"));
+      requests.push(url.searchParams);
+      const rows = [{ cid: "9", pid: "8", n: "云 & + 文件夹" }, { fid: "71", cid: "9", n: "云 & + 视频.mkv" }];
+      return Response.json({ state: true, offset, count: 2, data: rows.slice(offset, offset + 1) });
+    }
+    return fetcher(address, options);
+  };
+  for (const [sort, key, direction] of orders) {
+    const { path } = await drive.list("7", 0, sort);
+    assert.deepEqual(path, folderPath.map(({ cid, name }) => ({ id: cid, name })));
+    const params = requests.at(-1);
+    assert.deepEqual([params.get("o"), params.get("asc"), params.get("fc_mix"), params.get("custom_order")], [key, direction, "0", "1"]);
+  }
+  const first = await drive.search("7", " 云 & + ", 0, "newest");
+  assert.equal(first.nextOffset, 1);
+  const second = await drive.search("7", "云 & +", first.nextOffset, "newest");
+  assert.equal(second.nextOffset, null);
+  assert.deepEqual([...first.entries, ...second.entries].map(({ directory, video, parentId }) => [directory, video, parentId]),
+    [[true, false, "8"], [false, true, "9"]]);
+  assert.deepEqual(requests.slice(-2).map((params) => [params.get("cid"), params.get("search_value"), params.get("show_dir"), params.get("o"), params.get("asc"), params.get("offset")]),
+    [["7", "云 & +", "1", "user_ptime", "0", "0"], ["7", "云 & +", "1", "user_ptime", "0", "1"]]);
+  await assert.rejects(drive.search("7", "   "), /搜索词/);
+  await assert.rejects(drive.list("7", 0, "unknown"), /排序方式无效/);
+});
+
+test("115 浏览排序包含置顶项和系统目录，并在重新排序后分页", async () => {
+  const { drive, login, fetcher } = fixture();
+  await login();
+  const rows = [
+    { cid: "8", pid: "7", n: "Folder 101", tp: "101", is_top: 1 },
+    { cid: "9", pid: "7", n: "Folder 100", tp: "100" },
+    ...Array.from({ length: 99 }, (_, index) => ({ cid: String(index + 10), pid: "7", n: `Folder ${index + 1}`, tp: index + 1 })),
+    { ...videoRow, tp: 1, fid: "120" },
+  ];
+  drive.fetcher = async (address, options) => {
+    const url = new URL(address);
+    if (url.pathname !== "/files") return fetcher(address, options);
+    const offset = Number(url.searchParams.get("offset"));
+    return Response.json({ state: true, sys_count: 1, offset, count: rows.length, data: rows.slice(offset, offset + 79) });
+  };
+  for (const sort of ["name-asc", "oldest"]) {
+    const { entries, nextOffset } = await drive.browse("7", 0, sort);
+    assert.equal(nextOffset, 100);
+    assert.equal(entries[0].name, "Folder 1");
+    assert.equal(entries.at(-1).name, "Folder 100");
+    const next = await drive.browse("7", nextOffset, sort);
+    assert.deepEqual(next.entries.map(item => item.name), ["Folder 101", video.name]);
+  }
+  for (const sort of ["name-desc", "newest"]) {
+    const { entries } = await drive.browse("7", 0, sort);
+    assert.deepEqual(entries.slice(0, 2).map(item => item.name), ["Folder 101", "Folder 100"]);
+    assert.equal(entries.at(-1).name, "Folder 2");
   }
 });

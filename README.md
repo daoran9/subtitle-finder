@@ -2,21 +2,23 @@
 
 Windows 和 Android 上的字幕检索与管理工具。按片名、季集号或视频文件查找字幕，预览后保存到本机，也可以为 115 网盘中的视频查找并保存字幕。
 
-## 下载 v1.7.0
+## 下载 v1.7.1
 
-| 平台 | 下载 | 使用方式 |
-| --- | --- | --- |
-| Windows x64 | [安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.0/SubtitleFinder.Setup.1.7.0.exe) | 安装后从开始菜单启动 |
-| Windows x64 | [便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.0/SubtitleFinder.1.7.0.exe) | 放到可写目录，双击运行 |
-| Android | [正式签名 APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.0/SubtitleFinder.Android.1.7.0.apk) | 支持 Android 5.1 及以上，可覆盖安装同签名的旧版 |
+| 下载 | 使用方式 |
+| --- | --- |
+| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.1/SubtitleFinder.Setup.1.7.1.exe) | 安装后从开始菜单启动 |
+| [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.1/SubtitleFinder.1.7.1.exe) | 放到可写目录，双击运行 |
+| [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.1/SubtitleFinder.Android.1.7.1.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
 
-[发布说明与校验文件](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.0) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
+[v1.7.1 发布说明与校验值](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.1) · [最新正式版](https://github.com/daoran9/subtitle-finder/releases/latest) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
 
 Windows 程序未签名，首次运行时系统可能显示未知发布者。Android 若拦截 APK 安装，可在系统设置中允许当前来源安装应用。
 
-## v1.7.0 新功能
+## v1.7.1 新功能
 
-- **115 云盘字幕**。扫二维码登录，打开目录并选择视频。找到字幕后，可直接保存到视频所在的云盘目录。
+- **115 云盘字幕**。扫码登录后，选一个视频找字幕，或选整个文件夹批量匹配。字幕直接保存到对应视频所在的云盘目录。
+- **115 搜索与排序**。按名称查找当前目录及子目录里的文件和文件夹。排序可选名称或添加时间，两种方式都支持升序和降序。
+- **更新提醒**。应用启动后会检查 GitHub 正式版，找到适用于当前平台的新版时提供发布页入口。也可以在「关于 → 检查更新」手动查询。
 - **按视频名保存**。设置中的开关默认开启，适用于从本地视频搜索后的下载和 115 保存。关闭后使用字幕文件名。
 - **手机预览**。预览面板占当前可见高度的 70%，字幕正文可单独滚动，操作按钮按宽度换行。
 - **更精确的编号匹配**。统一横线、空格和连写形式的识别，过滤编号明确不符的结果。例如，搜索 `JAC-089` 时会排除 `JAC-0890`。
@@ -30,18 +32,20 @@ Windows 程序未签名，首次运行时系统可能显示未知发布者。And
 ### 保存字幕到 115
 
 1. 在「视频文件」点 **115**，选择登录端，点「生成二维码」后用 115 官方 App 扫码确认。
-2. 打开云盘目录并选择视频。程序按视频文件名搜索，选中结果可预览字幕。
+2. 浏览目录，或在搜索框输入文件夹名或文件名。从根目录可搜索整个云盘。找到视频后点选它，再打开一条字幕结果预览。
 3. 核对预览中的目标目录和文件名，点 **存到 115**。应用会在同一目录保存字幕，已有同名文件时会停止。
 
-例如，为 `影片.1080p.mkv` 保存 SRT 字幕时，开启「设置 → 按视频名保存字幕」会生成 `影片.1080p.srt`。关闭开关则保留预览字幕的文件名，简繁转换使用转换后的文件名。本地视频下载开启该开关时沿用命名预设，文件夹批量匹配可单独选择命名格式。
+例如，为 `影片.1080p.mkv` 保存 SRT 字幕时，开启「设置 → 按视频名保存字幕」会生成 `影片.1080p.srt`。关闭开关则保留预览字幕的文件名，简繁转换使用转换后的文件名。该设置也适用于 115 批量匹配。本地视频下载开启该开关时沿用命名预设，本地批量匹配可单独选择命名格式。
 
 同一登录端可能影响对应端的已有会话。以 SubtitleFinder 中显示的「已核对」端为准。退出应用后需重新扫码。支持的登录端和保存规则见 [115 使用说明](docs/115.md)。
 
 ### 批量匹配视频文件夹
 
-选择视频文件夹后，程序会递归扫描最多 500 个视频，识别同目录字幕与符合目标语言的内封字幕。默认仅显示缺字幕的视频。支持读取同名 NFO、`movie.nfo` 和 `tvshow.nfo` 补全搜索信息，可在设置中排除花絮、样片等文件。
+在 115 进入目标目录，点「选择当前文件夹」扫描，再点「匹配字幕」。程序会跳过已有同目录字幕的视频，把找到的字幕存到各视频所在目录。重启后重新扫码并扫描，可接着匹配仍缺字幕的视频。
 
-批量匹配支持 1 至 3 个并发任务，可以暂停、继续或重试。重启后可手动恢复未完成的任务。可选通用、Emby、Jellyfin、Plex 或视频同名命名。Windows 保存到视频所在目录，Android 保存到选取视频文件夹时授权的目录。
+本地文件夹支持识别同目录字幕和内封字幕，并可读取同名 NFO、`movie.nfo` 和 `tvshow.nfo` 补全搜索信息。本地和 115 都会递归扫描最多 500 个视频，支持排除花絮、样片等文件。
+
+批量匹配支持 1 至 3 个并发任务，可以暂停、继续或重试。本地批量任务可在重启后手动恢复，并可选择通用、Emby、Jellyfin、Plex 或视频同名命名。Windows 保存到视频所在目录，Android 保存到选取视频文件夹时授权的目录。
 
 ## 字幕来源与格式
 

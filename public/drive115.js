@@ -1,6 +1,6 @@
 import { analyzeMediaFile } from "./media-library.js";
 
-export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoName, feedback }) {
+export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMatchVideoName, feedback }) {
   const modal = document.querySelector("#drive115Modal");
   const dialog = modal.querySelector("[role=dialog]");
   const message = document.querySelector("#drive115Message");
@@ -18,16 +18,28 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
   const saveButton = document.querySelector("#save115Button");
   const nextButton = document.querySelector("#drive115Next");
   const previousButton = document.querySelector("#drive115Previous");
+  const folderButton = document.querySelector("#drive115SelectFolder");
+  const searchForm = document.querySelector("#drive115SearchForm");
+  const searchInput = document.querySelector("#drive115SearchInput");
+  const clearSearchButton = document.querySelector("#drive115ClearSearch");
+  const sortSelect = document.querySelector("#drive115Sort");
+  const directionSelect = document.querySelector("#drive115Direction");
+  const rootPath = [{ id: "0", name: "根目录" }];
   let video = null;
   let targetPath = "";
   let account = null;
-  let path = [{ id: "0", name: "根目录" }];
-  let offset = 0;
+  let path = rootPath;
+  let searchTerm = "";
+  let pageIndex = 0;
+  let pageOffsets = [0];
+  let pageRun = 0;
+  let folderTotal = 0;
   let nextOffset = null;
   let generation = 0;
   let timer;
   let saving = false;
   let loading = false;
+  let scanning = false;
   let focusReturn;
 
   async function api(action, body) {
@@ -56,9 +68,19 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
   }
 
   function clearTarget() { video = null; render(); }
+  function selectTarget(item, directory) { video = item; targetPath = directory; render(); }
+  function saveSubtitle(item, subtitle) {
+    return api("save", {
+      video: { id: item.id, parentId: item.parentId, name: item.name },
+      accountId: item.accountId,
+      resultId: subtitle.id, language: subtitle.language, conversion: subtitle.conversion,
+    });
+  }
   function cancelPolling() { generation += 1; clearTimeout(timer); qr.hidden = true; qr.removeAttribute("src"); }
   function close() {
     cancelPolling();
+    pageRun += 1;
+    loading = false;
     modal.hidden = true;
     if (!document.querySelector(".modal-backdrop:not([hidden])")) document.body.classList.remove("modal-open");
     focusReturn?.focus();
@@ -72,19 +94,68 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
     document.querySelector("#drive115Logout").hidden = !account;
   }
 
-  async function loadFiles(newOffset = 0) {
-    if (loading) return;
+  function clearSearch() {
+    searchTerm = "";
+    searchInput.value = "";
+    clearSearchButton.hidden = true;
+  }
+
+  function browse(directory) {
+    clearSearch();
+    return loadFiles(0, directory);
+  }
+
+  async function openEntry(entry, button) {
+    if (loading || saving) return;
+    const parent = entry.parentId === path[path.length - 1].id ? path
+      : entry.parentId === "0" ? rootPath : [...rootPath, { id: entry.parentId, name: `目录 ${entry.parentId}` }];
+    if (entry.directory) {
+      const folder = { id: entry.id, name: entry.name };
+      return browse(entry.parentId === path[path.length - 1].id ? [...path, folder] : [...rootPath, folder]);
+    }
+    if (!entry.video) return browse(parent);
+
+    const run = pageRun;
+    button.disabled = true;
+    try {
+      let directory = parent;
+      if (parent !== path && parent !== rootPath) {
+        const page = await api(`files?parentId=${entry.parentId}`);
+        if (run !== pageRun) return;
+        directory = page.path || parent;
+      }
+      selectTarget({ ...entry, ...analyzeMediaFile(entry.name), remote115: true, accountId: account.id }, directory.map((item) => item.name).join(" / "));
+      close(); onSelect(video);
+    } catch (error) {
+      if (run === pageRun) message.textContent = error.message;
+    } finally { button.disabled = false; }
+  }
+
+  async function loadFiles(newIndex = 0, requestPath = path, newOffset = 0) {
+    const run = ++pageRun;
+    const keyword = searchTerm;
+    const ascending = directionSelect.value === "asc";
+    const sort = sortSelect.value === "name" ? `name-${directionSelect.value}` : (ascending ? "oldest" : "newest");
+    const params = new URLSearchParams({ parentId: requestPath[requestPath.length - 1].id, offset: String(newOffset), sort });
+    if (keyword) params.set("q", keyword);
+    pageIndex = newIndex;
+    if (!newIndex) pageOffsets = [];
+    pageOffsets[newIndex] = newOffset;
     loading = true;
+    folderTotal = 0;
     list.replaceChildren();
-    message.textContent = "正在读取目录…";
+    message.textContent = keyword ? "正在搜索 115…" : "正在读取目录…";
+    folderButton.disabled = true;
     nextButton.disabled = true;
     previousButton.disabled = true;
     nextOffset = null;
-    const requestPath = path.slice();
+    const pageLabel = document.querySelector("#drive115Page");
+    pageLabel.textContent = "";
     try {
-      const data = await api(`files?parentId=${encodeURIComponent(requestPath[requestPath.length - 1].id)}&offset=${newOffset}`);
-      if (requestPath[requestPath.length - 1].id !== path[path.length - 1].id) return;
-      offset = data.offset;
+      const data = await api(`${keyword ? "search" : "files"}?${params}`);
+      if (run !== pageRun) return;
+      path = data.path || requestPath;
+      folderTotal = data.total;
       nextOffset = data.nextOffset;
       const crumbs = document.querySelector("#drive115Path");
       crumbs.replaceChildren();
@@ -93,33 +164,45 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
         button.type = "button";
         button.textContent = entry.name;
         button.disabled = index === path.length - 1;
-        button.onclick = () => { if (loading) return; path = path.slice(0, index + 1); void loadFiles(); };
+        button.onclick = () => { void browse(path.slice(0, index + 1)); };
         crumbs.append(button);
       });
-      for (const entry of data.entries.filter((item) => item.directory || item.video)) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "drive115-file";
-        button.textContent = `${entry.directory ? "文件夹 · " : "视频 · "}${entry.name}`;
-        button.onclick = () => {
-          if (loading || saving) return;
-          if (entry.directory) { path.push({ id: entry.id, name: entry.name }); void loadFiles(); }
-          else {
-            video = { ...entry, ...analyzeMediaFile(entry.name), remote115: true };
-            targetPath = path.map((item) => item.name).join(" / ");
-            render(); close(); onSelect(video);
-          }
-        };
-        list.append(button);
+      for (const entry of data.entries) {
+        const clickable = entry.directory || entry.video || Boolean(keyword);
+        const row = document.createElement(clickable ? "button" : "span");
+        row.textContent = `${entry.directory ? "文件夹" : entry.video ? "视频" : "文件"} · ${entry.name}`;
+        row.className = clickable ? "drive115-file" : "drive115-file-label";
+        if (clickable) {
+          row.type = "button";
+          row.onclick = () => { void openEntry(entry, row); };
+        }
+        list.append(row);
       }
-      message.textContent = list.children.length ? "选择视频后搜索字幕，可将字幕保存到视频所在目录。" : "本页没有文件夹或视频。";
-      document.querySelector("#drive115Page").textContent = `第 ${Math.floor(offset / 100) + 1} 页 · 共 ${data.total} 项`;
-    } catch (error) { message.textContent = error.message; }
-    finally {
-      loading = false;
-      nextButton.disabled = nextOffset === null;
-      previousButton.disabled = offset === 0;
+      list.scrollTop = 0;
+      message.textContent = keyword
+        ? (data.total ? `“${keyword}”的搜索结果` : `未找到与“${keyword}”匹配的文件或文件夹。`)
+        : (data.total ? "选择视频后搜索字幕，可将字幕保存到视频所在目录。" : "此目录为空。");
+      pageLabel.textContent = `第 ${pageIndex + 1} 页 · 共 ${data.total} 项`;
+    } catch (error) {
+      if (run === pageRun) message.textContent = error.message;
     }
+    finally {
+      if (run === pageRun) {
+        loading = false;
+        nextButton.disabled = nextOffset === null;
+        previousButton.disabled = pageIndex === 0;
+        folderButton.disabled = scanning || !folderTotal || Boolean(keyword);
+      }
+    }
+  }
+
+  function refresh() { return loadFiles(pageIndex, path, pageOffsets[pageIndex]); }
+  function resetBrowser() {
+    pageRun += 1;
+    path = rootPath;
+    pageIndex = 0;
+    pageOffsets = [0];
+    clearSearch();
   }
 
   async function open() {
@@ -128,17 +211,19 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
     document.body.classList.add("modal-open");
     dialog.focus();
     message.textContent = "正在读取登录状态…";
+    const run = generation;
     try {
       const data = await api("status");
+      if (run !== generation) return;
       account = data.account;
       if (!appSelect.options.length) {
         for (const app of data.apps) appSelect.add(new Option(app.label, app.id));
         appSelect.value = "ios";
       }
       renderAccount();
-      if (account) await loadFiles(offset);
+      if (account) await refresh();
       else message.textContent = "选择登录端，用 115 官方客户端扫描二维码并确认。";
-    } catch (error) { message.textContent = error.message; }
+    } catch (error) { if (run === generation) message.textContent = error.message; }
   }
 
   async function beginLogin() {
@@ -158,7 +243,7 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
           if (run !== generation) return;
           if (data.status === "confirmed") {
             account = data.account;
-            path = [{ id: "0", name: "根目录" }]; offset = 0;
+            resetBrowser();
             clearTarget(); cancelPolling(); renderAccount(); await loadFiles(); return;
           }
           message.textContent = ({ waiting: "等待扫码…", scanned: "已扫码，请在 115 中确认。", expired: "二维码已过期，请重新生成。", canceled: "已取消登录。" })[data.status];
@@ -176,14 +261,55 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
   appSelect.onchange = cancelPolling;
   qr.onerror = () => { message.textContent = "二维码图片加载失败，请重新生成。"; cancelPolling(); };
   clearButton.onclick = clearTarget;
-  document.querySelector("#drive115Refresh").onclick = () => { void loadFiles(offset); };
-  nextButton.onclick = () => { if (nextOffset !== null) void loadFiles(nextOffset); };
-  previousButton.onclick = () => { void loadFiles(Math.max(0, offset - 100)); };
+  document.querySelector("#drive115Refresh").onclick = () => { void refresh(); };
+  searchForm.onsubmit = (event) => {
+    event.preventDefault();
+    const keyword = searchInput.value.trim();
+    if (!keyword) return;
+    searchTerm = keyword;
+    clearSearchButton.hidden = false;
+    void loadFiles();
+  };
+  searchInput.oninput = () => { if (!searchInput.value && searchTerm) void browse(path); };
+  clearSearchButton.onclick = () => { void browse(path); searchInput.focus(); };
+  sortSelect.onchange = () => {
+    const byName = sortSelect.value === "name";
+    directionSelect.options[0].textContent = byName ? "A → Z" : "旧 → 新";
+    directionSelect.options[1].textContent = byName ? "Z → A" : "新 → 旧";
+    void loadFiles();
+  };
+  directionSelect.onchange = () => { void loadFiles(); };
+  folderButton.onclick = async () => {
+    if (!account || loading || scanning || saving || searchTerm) return;
+    const run = pageRun;
+    const folder = path[path.length - 1];
+    const directory = path.map((entry) => entry.name).join(" / ");
+    const stillSelected = () => run === pageRun;
+    const params = new URLSearchParams({ parentId: folder.id, folderName: folder.id === "0" ? "" : folder.name });
+    scanning = true;
+    folderButton.disabled = true;
+    message.textContent = "正在扫描 115 文件夹及子目录…";
+    try {
+      const data = await api(`scan?${params}`);
+      if (!stillSelected()) return;
+      const files = data.files.map((file) => ({ ...file, remote115: true, accountId: data.accountId,
+        directoryLabel: [directory, ...file.parentNames.slice(folder.id === "0" ? 0 : 1)].join(" / ") }));
+      close();
+      await onFolder({ selected: true, label: `115 · ${directory}`, files, truncated: data.truncated });
+    } catch (error) {
+      if (stillSelected()) message.textContent = error.message;
+    } finally {
+      scanning = false;
+      if (!loading) folderButton.disabled = !folderTotal || Boolean(searchTerm);
+    }
+  };
+  nextButton.onclick = () => { if (nextOffset !== null) void loadFiles(pageIndex + 1, path, nextOffset); };
+  previousButton.onclick = () => { if (pageIndex) void loadFiles(pageIndex - 1, path, pageOffsets[pageIndex - 1]); };
   document.querySelector("#drive115Logout").onclick = async () => {
     if (saving) return;
     try {
       await api("logout", {}); cancelPolling(); account = null; clearTarget(); renderAccount();
-      path = [{ id: "0", name: "根目录" }]; offset = 0;
+      resetBrowser();
       message.textContent = "已退出 115。";
     } catch (error) { message.textContent = error.message; }
   };
@@ -192,7 +318,7 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
     if (!video || !subtitle || saving) return;
     saving = true; render(); feedback("正在上传字幕到 115…", "busy");
     try {
-      const result = await api("save", { video: { id: video.id, parentId: video.parentId, name: video.name }, resultId: subtitle.id, language: subtitle.language, conversion: subtitle.conversion });
+      const result = await saveSubtitle(video, subtitle);
       feedback(`已保存到 115 · ${result.fileName}`, "ok");
     } catch (error) { feedback(error.message, "error"); }
     finally { saving = false; render(); }
@@ -201,12 +327,13 @@ export function initDrive115({ apiUrl, onSelect, getSubtitle, shouldMatchVideoNa
   modal.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); close(); }
     if (event.key === "Tab") {
-      const focusable = [...dialog.querySelectorAll("button:not(:disabled), select")].filter((element) => element.getClientRects().length);
+      const focusable = [...dialog.querySelectorAll("button:not(:disabled), select:not(:disabled), input:not(:disabled)")].filter((element) => element.getClientRects().length);
       const first = focusable[0]; const last = focusable[focusable.length - 1];
       if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }
   });
   render();
-  return { get video() { return video; }, render, clearTarget };
+  return { get video() { return video; }, render, clearTarget, selectTarget, saveSubtitle,
+    isSignedIn: (accountId) => Boolean(account && account.id === accountId) };
 }

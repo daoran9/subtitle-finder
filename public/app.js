@@ -63,6 +63,11 @@ const nodes = {
   language: document.querySelector("#languageSelect"),
   settingsButton: document.querySelector("#settingsButton"),
   aboutButton: document.querySelector("#aboutButton"),
+  appVersion: document.querySelector("#appVersion"),
+  updateLink: document.querySelector("#updateLink"),
+  checkUpdatesButton: document.querySelector("#checkUpdatesButton"),
+  aboutUpdateLink: document.querySelector("#aboutUpdateLink"),
+  updateStatus: document.querySelector("#updateStatus"),
   resultSummary: document.querySelector("#resultSummary"),
   statusBadge: document.querySelector("#statusBadge"),
   sourceStats: document.querySelector("#sourceStats"),
@@ -103,6 +108,8 @@ const nodes = {
   retryBatchButton: document.querySelector("#retryBatchButton"),
   batchProgress: document.querySelector("#batchProgress"),
   namingPreset: document.querySelector("#namingPresetSelect"),
+  batchNamingPreset: document.querySelector("#batchNamingPreset"),
+  cloudBatchNaming: document.querySelector("#cloudBatchNaming"),
   batchConcurrency: document.querySelector("#batchConcurrencySelect"),
   assrtToken: document.querySelector("#assrtTokenInput"),
   videoScanMeta: document.querySelector("#videoScanMeta"),
@@ -121,6 +128,11 @@ const drive115UI = initDrive115({
     nodes.query.value = video.query;
     renderClearQueryButton();
     void searchSubtitles();
+  },
+  async onFolder(result) {
+    pauseBatchMatch();
+    await savePersistentBatchState({ immediate: true });
+    return loadVideoSelectionResult(result, { cloud115: true });
   },
   getSubtitle() {
     if (!state.downloadUrl || !state.selectedId) return null;
@@ -335,6 +347,8 @@ restoreVideoFilter();
 restoreBatchSettings();
 syncConversionControl();
 const settingsReadyPromise = restoreAppSettings();
+nodes.checkUpdatesButton.addEventListener("click", () => { void checkForUpdates(); });
+void settingsReadyPromise.then(() => checkForUpdates());
 
 // 1.14 渲染初始状态
 renderClearQueryButton();
@@ -364,6 +378,32 @@ void restorePersistentBatchState();
 window.addEventListener("pagehide", () => {
   void savePersistentBatchState({ immediate: true });
 });
+
+async function checkForUpdates() {
+  if (nodes.checkUpdatesButton.disabled) return;
+  nodes.checkUpdatesButton.disabled = true;
+  nodes.updateStatus.textContent = "正在检查更新…";
+  try {
+    const response = await fetch(apiUrl("/api/update"), { cache: "no-store" });
+    const release = await response.json();
+    if (!response.ok) throw new Error(release.error);
+    const platform = window.subtitleFinder?.platform;
+    const newer = release.version.localeCompare(nodes.appVersion.textContent, "en", { numeric: true }) > 0;
+    const available = newer && (!platform || release.platforms.includes(platform));
+    nodes.updateLink.hidden = !available;
+    nodes.aboutUpdateLink.hidden = !available;
+    if (available) {
+      nodes.updateLink.textContent = `新版 v${release.version} 可用`;
+      nodes.updateLink.href = release.url;
+      nodes.aboutUpdateLink.href = release.url;
+    }
+    nodes.updateStatus.textContent = available ? `新版 v${release.version} 可用` : "当前平台暂无较新的正式版";
+  } catch {
+    nodes.updateStatus.textContent = "暂时无法检查更新，请稍后重试";
+  } finally {
+    nodes.checkUpdatesButton.disabled = false;
+  }
+}
 
 async function searchSubtitles() {
   /*
@@ -908,6 +948,7 @@ async function saveSettings() {
     state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
     state.customDictionary = String(data.settings?.customDictionary || "");
     drive115UI.render();
+    renderBatchMatchState();
 
     // 6.4.3 Windows 保存右键菜单状态
     if (window.subtitleFinder?.setContextMenuState) {
@@ -1277,7 +1318,7 @@ async function syncCurrentSubtitle() {
     logger.info("启动当前字幕自动校时完成: unsupported");
     return;
   }
-  if (!video?.path) {
+  if (!video?.path || video.remote115) {
     setStatus("先选视频", "warn");
     logger.info("启动当前字幕自动校时完成: no video");
     return;
@@ -1458,7 +1499,8 @@ function renderSubtitleSyncState() {
 
   // 5.8.2 同步运行状态和按钮可用性
   const active = ["starting", "running", "canceling"].includes(state.syncStatus);
-  const ready = Boolean(getActiveVideo()?.path && state.previewText && state.downloadDir);
+  const video = getActiveVideo();
+  const ready = Boolean(video?.path && !video.remote115 && state.previewText && state.downloadDir);
   nodes.syncButton.disabled = active || !ready;
   nodes.syncButton.hidden = active;
   nodes.cancelSyncButton.hidden = !active;
@@ -1784,7 +1826,7 @@ async function loadVideoSelectionResult(result, options = {}) {
   state.batchStateTouched = true;
   state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
   state.videoDirectoryLabel = String(result.label || result.directory || "");
-  state.videoDirectoryId = options.singleVideo ? "" : String(result.directory || result.label || "");
+  state.videoDirectoryId = options.singleVideo || options.cloud115 ? "" : String(result.directory || result.label || "");
   state.singleVideoMode = Boolean(options.singleVideo);
   state.batchTasks = [];
   state.batchStatus = "idle";
@@ -1799,8 +1841,11 @@ async function loadVideoSelectionResult(result, options = {}) {
   renderVideoFiles();
   renderSubtitleSyncState();
   renderBatchMatchState();
-  if (!options.singleVideo) await savePersistentBatchState({ immediate: true });
+  if (!options.singleVideo && !options.cloud115) await savePersistentBatchState({ immediate: true });
   setStatus(state.videoFiles.length ? "已载入" : "无视频", state.videoFiles.length ? "ok" : "warn");
+  if (options.cloud115) {
+    nodes.resultSummary.textContent = result.truncated ? "115 扫描已达到 500 个视频，请分文件夹匹配" : `${result.label} · ${state.videoFiles.length} 个视频`;
+  }
 
   // 7.3.3 单视频入口自动开始搜索
   if (options.startSearch && selectedVideo) await searchSubtitles();
@@ -1911,7 +1956,8 @@ function renderVideoFiles() {
   nodes.videoList.querySelectorAll("[data-video-index]").forEach((button) => {
     button.addEventListener("click", () => {
       const item = state.videoFiles[Number(button.dataset.videoIndex)];
-      drive115UI.clearTarget();
+      if (item?.remote115) drive115UI.selectTarget(item, item.directoryLabel);
+      else drive115UI.clearTarget();
       state.activeVideoPath = (item && item.path) || "";
       nodes.videoList.querySelectorAll(".video-file-button").forEach((videoButton) => {
         videoButton.classList.toggle("is-active", videoButton === button);
@@ -2363,7 +2409,12 @@ async function startOrResumeBatchMatch() {
     logger.info("启动或继续批量匹配完成: already running");
     return;
   }
-  if (!(window.subtitleFinder && window.subtitleFinder.inspectVideo && window.subtitleFinder.saveSubtitle)) {
+  const cloudVideo = state.videoFiles[0]?.remote115 ? state.videoFiles[0] : null;
+  if (cloudVideo && !drive115UI.isSignedIn(cloudVideo.accountId)) {
+    setStatus("请先登录扫描时使用的 115 账号", "warn");
+    return;
+  }
+  if (!cloudVideo && !(window.subtitleFinder && window.subtitleFinder.inspectVideo && window.subtitleFinder.saveSubtitle)) {
     setStatus("当前版本不支持", "error");
     logger.info("启动或继续批量匹配完成: unsupported");
     return;
@@ -2447,7 +2498,7 @@ async function processBatchTask(task, runId) {
 
   try {
     task.phase = "inspect";
-    const inspection = await inspectVideoForSearch(video);
+    const inspection = video.remote115 ? {} : await inspectVideoForSearch(video);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
     updateVideoInspectionState(video, inspection);
     if (video.hasEmbeddedSubtitle) {
@@ -2584,6 +2635,9 @@ async function chooseBestValidSubtitleResult(results, task, controller) {
 }
 
 async function saveBatchSubtitle(video, result) {
+  if (video.remote115) {
+    return drive115UI.saveSubtitle(video, { id: result.id, language: nodes.language.value });
+  }
   /*
    * ================================================================================
    * 步骤15：保存批量匹配字幕
@@ -2694,6 +2748,10 @@ function renderBatchMatchState() {
   // 18.1 没有视频时隐藏面板
   const missingCount = state.videoFiles.filter((video) => !video.hasSubtitle).length;
   nodes.batchPanel.hidden = state.videoFiles.length === 0 || state.singleVideoMode;
+  const cloud = Boolean(state.videoFiles[0]?.remote115);
+  nodes.batchNamingPreset.hidden = cloud;
+  nodes.cloudBatchNaming.hidden = !cloud;
+  if (cloud) nodes.cloudBatchNaming.textContent = state.matchVideoName ? "115 · 按视频名保存" : "115 · 按字幕名保存";
   const total = state.batchTasks.length;
   const counts = state.batchTasks.reduce((summary, task) => {
     summary[task.status] = (summary[task.status] || 0) + 1;

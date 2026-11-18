@@ -121,6 +121,12 @@ h2 {
   color: var(--muted);
 }
 
+.update-notice a {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 13px;
+}
+
 .search-form {
   display: grid;
   gap: 12px;
@@ -981,9 +987,12 @@ tbody tr.is-active {
 .drive115-body { overflow-y: auto; min-height: 0; }
 .drive115-body select { max-width: 100%; margin-bottom: 8px; }
 #drive115Qr { display: block; max-width: 100%; object-fit: contain; margin: 12px auto; background: white; }
-.drive115-path, .drive115-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.drive115-path, .drive115-pagination, .drive115-search, .drive115-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
+.drive115-search input { flex: 1 1 150px; min-width: 0; }
+.drive115-controls select { width: auto; margin: 0; }
 .drive115-files { display: grid; gap: 5px; max-height: 40vh; overflow-y: auto; }
 .drive115-files .drive115-file { text-align: left; overflow-wrap: anywhere; width: 100%; }
+.drive115-file-label { padding: 7px 10px; color: var(--muted); overflow-wrap: anywhere; }
 .drive115-target { flex: 0 0 auto; padding: 8px 12px; background: var(--panel-strong); color: var(--accent-dark); font-size: 12px; }
 .drive115-destination { display: flex; gap: 6px; }
 .drive115-destination > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

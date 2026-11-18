@@ -63,6 +63,8 @@ const ASSRT_DOH_PROVIDERS = [
 ];
 const SHOOTER_API_URL = "https://www.shooter.cn/api/subapi.php";
 const XUNLEI_FINGERPRINT_URL = "http://sub.xmp.sandai.net:8000/subxl";
+const RELEASES_URL = "https://github.com/daoran9/subtitle-finder/releases";
+const LATEST_RELEASE_API = "https://api.github.com/repos/daoran9/subtitle-finder/releases/latest";
 const UNRAR_WASM_PATH = path.join(__dirname, "vendor", "unrar.wasm");
 const SEVEN_ZIP_WASM_PATH = path.join(__dirname, "vendor", "7zz.wasm");
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
@@ -217,6 +219,15 @@ async function routeRequest(req, res, drive115) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/update") {
+    try {
+      sendJson(res, 200, await readLatestRelease());
+    } catch {
+      sendJson(res, 503, { error: "暂时无法检查更新，请稍后重试" });
+    }
+    return;
+  }
+
   // 2.3 搜索字幕
   if (url.pathname === "/api/search") {
     await handleSearch(req, url, res);
@@ -264,6 +275,51 @@ async function routeRequest(req, res, drive115) {
   logger.info("请求分发完成: static");
 }
 
+export async function readLatestRelease(request = fetchWithTimeout) {
+  const headers = { "user-agent": "SubtitleFinder" };
+  const response = await request(LATEST_RELEASE_API, {
+    headers: { ...headers, accept: "application/vnd.github+json" },
+    timeoutMs: 7000,
+    allowErrorStatus: true,
+  });
+  let tag;
+  let names;
+  if (response.ok) {
+    const release = await response.json();
+    tag = release.tag_name;
+    if (release.draft !== false || release.prerelease !== false || !/^v\d+\.\d+\.\d+$/.test(tag)) {
+      throw new Error("不是可用的正式版本");
+    }
+    names = release.assets.filter((asset) => asset.state === "uploaded").map((asset) => asset.name);
+  } else if (response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0")) {
+    const head = { headers, method: "HEAD", redirect: "manual", allowErrorStatus: true, timeoutMs: 5000 };
+    const latest = await request(`${RELEASES_URL}/latest`, head);
+    const prefix = `${RELEASES_URL}/tag/`;
+    const location = new URL(latest.headers.get("location") || "", RELEASES_URL).href;
+    tag = location.startsWith(prefix) ? location.slice(prefix.length) : "";
+    if (latest.status !== 302 || !/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error("找不到正式版本");
+
+    const version = tag.slice(1);
+    const assets = [`SubtitleFinder.Setup.${version}.exe`, `SubtitleFinder.${version}.exe`, `SubtitleFinder.Android.${version}.apk`];
+    names = (await Promise.all(assets.map(async (name) => {
+      const probe = await request(`${RELEASES_URL}/download/${tag}/${name}`, head);
+      if (probe.status === 404) return null;
+      const download = new URL(probe.headers.get("location") || "", RELEASES_URL);
+      if (probe.status !== 302 || download.protocol !== "https:" || !download.hostname.endsWith(".githubusercontent.com")) {
+        throw new Error("无法核对发布附件");
+      }
+      return name;
+    }))).filter(Boolean);
+  } else {
+    throw new Error("无法读取正式版本");
+  }
+
+  const platforms = [];
+  if (names.some((name) => /^SubtitleFinder.*\.exe$/i.test(name))) platforms.push("windows");
+  if (names.some((name) => /^SubtitleFinder.*\.apk$/i.test(name))) platforms.push("android");
+  return { version: tag.slice(1), platforms, url: `${RELEASES_URL}/tag/${tag}` };
+}
+
 async function handleDrive115(req, res, url, drive) {
   const origin = req.headers.origin;
   const allowedOrigins = [`http://127.0.0.1:${runtimePort}`, `http://localhost:${runtimePort}`, "http://localhost", "https://localhost", "capacitor://localhost"];
@@ -279,7 +335,19 @@ async function handleDrive115(req, res, url, drive) {
   const action = url.pathname.slice("/api/drive115/".length);
   try {
     if (req.method === "GET" && action === "status") return sendJson(res, 200, drive.status());
-    if (req.method === "GET" && action === "files") return sendJson(res, 200, await drive.list(url.searchParams.get("parentId") || "0", Number(url.searchParams.get("offset") || 0)));
+    if (req.method === "GET" && (action === "files" || action === "search")) {
+      const parentId = url.searchParams.get("parentId") || "0";
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const sort = url.searchParams.get("sort") ?? undefined;
+      const page = action === "search"
+        ? await drive.search(parentId, url.searchParams.get("q"), offset, sort)
+        : await drive.browse(parentId, offset, sort);
+      return sendJson(res, 200, page);
+    }
+    if (req.method === "GET" && action === "scan") {
+      const parentId = url.searchParams.get("parentId");
+      return sendJson(res, 200, await drive.scanFolder(parentId, runtimePreferences.scanExclusionRules, url.searchParams.get("folderName")));
+    }
     if (req.method === "GET" && action === "qr-image") {
       const image = await drive.qrImage(url.searchParams.get("id"));
       res.writeHead(200, withCorsHeaders({ "content-type": image.contentType, "cache-control": "no-store", "x-content-type-options": "nosniff" }));
@@ -297,7 +365,7 @@ async function handleDrive115(req, res, url, drive) {
       if (!result) return sendJson(res, 404, { error: "字幕结果已过期，请重新搜索" });
       const { matchVideoName } = runtimePreferences;
       const { payload } = await getValidatedSubtitlePayload({ ...result }, String(body.language || "zh-CN"), normalizeConversionTarget(body.conversion));
-      return sendJson(res, 200, await drive.save(body.video, payload, matchVideoName));
+      return sendJson(res, 200, await drive.save(body.video, payload, matchVideoName, body.accountId));
     }
     sendJson(res, 404, { error: "未找到接口" });
   } catch (error) {
@@ -4447,7 +4515,7 @@ async function nodeFetchCompat(url, options = {}) {
         res.on("end", () => {
           const status = Number(res.statusCode || 0);
           const location = res.headers.location;
-          if ([301, 302, 303, 307, 308].includes(status) && location && redirects < MAX_FETCH_REDIRECTS) {
+          if (options.redirect !== "manual" && [301, 302, 303, 307, 308].includes(status) && location && redirects < MAX_FETCH_REDIRECTS) {
             const nextUrl = new URL(location, requestUrl).href;
             logger.info("Node 兼容请求跳转", redactSensitiveUrl(nextUrl));
             resolve(nodeFetchCompat(nextUrl, { ...options, redirects: redirects + 1, method: status === 303 ? "GET" : options.method }));
