@@ -1,6 +1,6 @@
 {
   "name": "subtitle-finder",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "description": "Local-first subtitle search and management app for Windows and Android",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "daoran9",
@@ -113,6 +113,6 @@
     "iconv-lite": "^0.6.3",
     "mediainfo.js": "^0.3.7",
     "node-unrar-js": "^2.0.2",
-    "opencc-js": "^1.4.1"
+    "opencc-js": "^1.4.2"
   }
 }

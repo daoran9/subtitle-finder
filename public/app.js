@@ -517,7 +517,7 @@ function buildSearchRequest({ query, source, language, limit, video = null, vide
    * ================================================================================
    * 目标：
    * 1) 手动搜索只携带原有片名、来源和语言参数
-   * 2) 本地视频搜索额外携带视频指纹和发布版本
+   * 2) 视频搜索携带文件名和版本信息，本地视频额外携带可用指纹
    */
   logger.info("开始生成字幕搜索请求...");
 
@@ -529,12 +529,13 @@ function buildSearchRequest({ query, source, language, limit, video = null, vide
     limit: String(limit || 80),
   });
 
-  // 2.5.2 只给本地视频附加精准匹配参数
+  // 2.5.2 附加视频来源与匹配参数
   if (video) {
     if (videoInfo.shooterHash) params.set("shooterHash", videoInfo.shooterHash);
     if (videoInfo.thunderCid) params.set("thunderCid", videoInfo.thunderCid);
     params.set("videoFileName", video.name || "video.mkv");
     params.set("releaseName", video.name || query || "video.mkv");
+    if (video.remote115) params.set("remote115", "1");
     if (video.catalogCode) params.set("catalogCode", video.catalogCode);
     if (Number(videoInfo.videoDurationMs || video.videoDurationMs) > 0) {
       params.set("videoDurationMs", String(Number(videoInfo.videoDurationMs || video.videoDurationMs)));

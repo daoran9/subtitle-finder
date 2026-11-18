@@ -86,17 +86,16 @@ logger.info("验证字幕结构校验完成");
  * 步骤2：验证 OpenCC 简繁转换
  * ================================================================================
  * 目标：
- * 1) 转换字形和台湾地区词组
+ * 1) 转换字形，保留原有用词
  * 2) 保持时间轴不变并生成独立文件名
  */
 logger.info("开始验证 OpenCC 简繁转换...");
 
-// 2.1 简体转繁体使用词组转换
+// 2.1 简体转繁体根据词义选择字形
 test("简体字幕转换为繁体副本", () => {
   const converted = convertSubtitleChinese(VALID_SRT, "zh-TW");
-  assert.match(converted, /軟體/);
-  assert.match(converted, /出租車/);
-  assert.match(converted, /執行/);
+  assert.match(converted, /這個軟件在出租車裡面運行/);
+  assert.equal(convertSubtitleChinese("发现头发，干活，吃面条。", "zh-TW"), "發現頭髮，幹活，吃麵條。");
   assert.match(converted, /00:00:01,000 --> 00:00:03,000/);
   assert.equal(buildConvertedSubtitleFileName("Daria.chs.srt", "zh-TW"), "Daria.cht.srt");
 });
@@ -104,8 +103,22 @@ test("简体字幕转换为繁体副本", () => {
 // 2.2 繁体转简体生成新后缀
 test("繁体字幕转换为简体副本", () => {
   const converted = convertSubtitleChinese("00:00:01,000 --> 00:00:02,000\n軟體裡面", "zh-CN");
-  assert.match(converted, /软件里面/);
+  assert.match(converted, /软体里面/);
   assert.equal(buildConvertedSubtitleFileName("Daria.zh-TW.ass", "zh-CN"), "Daria.chs.ass");
+});
+
+test("简繁混排时保留已有简体字和原用词", () => {
+  const time = "00:00:01,000 --> 00:00:02,000";
+  const original = `1\r\n${time}\r\n怎么又拿这个？又斡嘛？\r\n這是什麼？又幹嘛？\r\n幺号还在斡旋。用軟體叫計程車。\r\n`;
+  const expected = `1\r\n${time}\r\n怎么又拿这个？又斡嘛？\r\n这是什么？又干嘛？\r\n幺号还在斡旋。用软体叫计程车。\r\n`;
+  assert.equal(convertSubtitleChinese(original, "zh-CN"), expected);
+  assert.equal(convertSubtitleChinese(expected, "zh-CN"), expected);
+});
+
+test("简繁混排时保留简繁同形词的含义", () => {
+  const original = "请呼叫總部，建立返航序列。停用核心備份。用軟體叫計程車。";
+  const expected = "请呼叫总部，建立返航序列。停用核心备份。用软体叫计程车。";
+  assert.equal(convertSubtitleChinese(original, "zh-CN"), expected);
 });
 
 logger.info("验证 OpenCC 简繁转换完成");
@@ -123,8 +136,9 @@ logger.info("开始验证自定义简繁词库...");
 // 3.1 自定义词条覆盖 OpenCC 默认结果并支持反向转换
 test("自定义词库按简体和繁体目标双向应用", () => {
   const dictionary = "软件=軟件\n出租车=計程車";
-  assert.match(convertSubtitleChinese(VALID_SRT, "zh-TW", { customDictionary: dictionary }), /軟件在計程車裡面執行/);
+  assert.match(convertSubtitleChinese(VALID_SRT, "zh-TW", { customDictionary: dictionary }), /軟件在計程車裡面運行/);
   assert.equal(convertSubtitleChinese("軟件與計程車", "zh-CN", { customDictionary: dictionary }), "软件与出租车");
+  assert.equal(convertSubtitleChinese("又斡嘛", "zh-CN", { customDictionary: "干啥=斡嘛" }), "又干啥");
 });
 
 // 3.2 注释和重复词条不会生成多余映射

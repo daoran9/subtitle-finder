@@ -300,6 +300,41 @@ test("番号视频按来源分配原文件名和标准检索词", () => {
   assert.deepEqual(intent.catalogVariants, ["JAC-089", "JAC 089", "JAC089"]);
 });
 
+test("115 视频用标准编号查询迅雷，只保留有编号依据的候选", async () => {
+  const query = "ABC-123";
+  const videoFileName = "ABC-123-CloudCopy.mp4";
+  const catalogIdentity = extractAvIdentity(query);
+  const intent = buildSearchIntent({ query, queryVariants: [query], videoFileName, catalogIdentity });
+  const requested = [];
+  const verifiedHash = "A".repeat(40) + ".ass";
+  const request = async (url) => {
+    requested.push(new URL(url).searchParams.get("name"));
+    return Response.json({
+      code: 0,
+      result: "ok",
+      data: [
+        { name: "B".repeat(40) + ".ass", ext: "ass" },
+        { ext: "srt" },
+        { name: "ABC-1230.srt", ext: "srt" },
+        { name: "ABC-123.srt", ext: "srt" },
+        { name: verifiedHash, extra_name: "ABC-123", ext: "ass" },
+      ],
+    });
+  };
+  const [source] = buildSelectedSearchSources({
+    source: "thunder",
+    queryVariants: intent.generalVariants,
+    thunderQueryVariants: intent.thunderVariants,
+    catalogIdentity,
+    request,
+    language: "zh-CN",
+  });
+  const rows = await source.search(40);
+  const results = mergeSearchResultBuckets([rows], 40, { queryVariants: [query], catalogIdentity });
+  assert.deepEqual(requested, ["ABC-123", "ABC 123", "ABC123"]);
+  assert.deepEqual(new Set(results.map((item) => item.fileName)), new Set(["ABC-123.srt", verifiedHash]));
+});
+
 // 3.3 全部搜索继续调度两个专项编号源
 test("编号查询的全部搜索继续调度专项来源", () => {
   const selected = buildSelectedSearchSources({

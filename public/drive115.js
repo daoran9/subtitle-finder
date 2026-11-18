@@ -1,5 +1,11 @@
 import { analyzeMediaFile } from "./media-library.js";
 
+const SORT_ORDERS = {
+  name: { asc: "name-asc", desc: "name-desc" },
+  time: { asc: "oldest", desc: "newest" },
+  updated: { asc: "updated-asc", desc: "updated-desc" },
+};
+
 export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMatchVideoName, feedback }) {
   const modal = document.querySelector("#drive115Modal");
   const dialog = modal.querySelector("[role=dialog]");
@@ -134,8 +140,7 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
   async function loadFiles(newIndex = 0, requestPath = path, newOffset = 0) {
     const run = ++pageRun;
     const keyword = searchTerm;
-    const ascending = directionSelect.value === "asc";
-    const sort = sortSelect.value === "name" ? `name-${directionSelect.value}` : (ascending ? "oldest" : "newest");
+    const sort = SORT_ORDERS[sortSelect.value][directionSelect.value];
     const params = new URLSearchParams({ parentId: requestPath[requestPath.length - 1].id, offset: String(newOffset), sort });
     if (keyword) params.set("q", keyword);
     pageIndex = newIndex;

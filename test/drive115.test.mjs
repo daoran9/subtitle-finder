@@ -237,13 +237,14 @@ test("115 文件夹分页递归扫描，只用同目录字幕判定并遵守扫�
   await assert.rejects(drive.save(video, payload, true, "999"), /登录账号已变更/);
 });
 
-test("115 名称与添加时间升降序、搜索分页及跨目录结果保留真实父目录", async () => {
+test("115 名称、添加时间及更新时间升降序，搜索分页保留真实父目录", async () => {
   const { drive, login, fetcher } = fixture();
   await login();
   const folderPath = [{ cid: "0", name: "根目录" }, { cid: "7", name: "Series" }];
   const orders = [
     ["name-asc", "file_name", "1"], ["name-desc", "file_name", "0"],
     ["oldest", "user_ptime", "1"], ["newest", "user_ptime", "0"],
+    ["updated-asc", "user_utime", "1"], ["updated-desc", "user_utime", "0"],
   ];
   const requests = [];
   drive.fetcher = async (address, options) => {
@@ -266,14 +267,14 @@ test("115 名称与添加时间升降序、搜索分页及跨目录结果保留�
     const params = requests.at(-1);
     assert.deepEqual([params.get("o"), params.get("asc"), params.get("fc_mix"), params.get("custom_order")], [key, direction, "0", "1"]);
   }
-  const first = await drive.search("7", " 云 & + ", 0, "newest");
+  const first = await drive.search("7", " 云 & + ", 0, "updated-desc");
   assert.equal(first.nextOffset, 1);
-  const second = await drive.search("7", "云 & +", first.nextOffset, "newest");
+  const second = await drive.search("7", "云 & +", first.nextOffset, "updated-desc");
   assert.equal(second.nextOffset, null);
   assert.deepEqual([...first.entries, ...second.entries].map(({ directory, video, parentId }) => [directory, video, parentId]),
     [[true, false, "8"], [false, true, "9"]]);
   assert.deepEqual(requests.slice(-2).map((params) => [params.get("cid"), params.get("search_value"), params.get("show_dir"), params.get("o"), params.get("asc"), params.get("offset")]),
-    [["7", "云 & +", "1", "user_ptime", "0", "0"], ["7", "云 & +", "1", "user_ptime", "0", "1"]]);
+    [["7", "云 & +", "1", "user_utime", "0", "0"], ["7", "云 & +", "1", "user_utime", "0", "1"]]);
   await assert.rejects(drive.search("7", "   "), /搜索词/);
   await assert.rejects(drive.list("7", 0, "unknown"), /排序方式无效/);
 });
@@ -282,10 +283,10 @@ test("115 浏览排序包含置顶项和系统目录，并在重新排序后分�
   const { drive, login, fetcher } = fixture();
   await login();
   const rows = [
-    { cid: "8", pid: "7", n: "Folder 101", tp: "101", is_top: 1 },
-    { cid: "9", pid: "7", n: "Folder 100", tp: "100" },
-    ...Array.from({ length: 99 }, (_, index) => ({ cid: String(index + 10), pid: "7", n: `Folder ${index + 1}`, tp: index + 1 })),
-    { ...videoRow, tp: 1, fid: "120" },
+    { cid: "8", pid: "7", n: "Folder 101", tp: "101", te: "1", is_top: 1 },
+    { cid: "9", pid: "7", n: "Folder 100", tp: "100", user_utime: "2" },
+    ...Array.from({ length: 99 }, (_, index) => ({ cid: String(index + 10), pid: "7", n: `Folder ${index + 1}`, tp: index + 1, te: 101 - index })),
+    { ...videoRow, tp: 1, te: 200, fid: "120" },
   ];
   drive.fetcher = async (address, options) => {
     const url = new URL(address);
@@ -293,7 +294,7 @@ test("115 浏览排序包含置顶项和系统目录，并在重新排序后分�
     const offset = Number(url.searchParams.get("offset"));
     return Response.json({ state: true, sys_count: 1, offset, count: rows.length, data: rows.slice(offset, offset + 79) });
   };
-  for (const sort of ["name-asc", "oldest"]) {
+  for (const sort of ["name-asc", "oldest", "updated-desc"]) {
     const { entries, nextOffset } = await drive.browse("7", 0, sort);
     assert.equal(nextOffset, 100);
     assert.equal(entries[0].name, "Folder 1");
@@ -301,7 +302,7 @@ test("115 浏览排序包含置顶项和系统目录，并在重新排序后分�
     const next = await drive.browse("7", nextOffset, sort);
     assert.deepEqual(next.entries.map(item => item.name), ["Folder 101", video.name]);
   }
-  for (const sort of ["name-desc", "newest"]) {
+  for (const sort of ["name-desc", "newest", "updated-asc"]) {
     const { entries } = await drive.browse("7", 0, sort);
     assert.deepEqual(entries.slice(0, 2).map(item => item.name), ["Folder 101", "Folder 100"]);
     assert.equal(entries.at(-1).name, "Folder 2");

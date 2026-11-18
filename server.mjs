@@ -39,7 +39,7 @@ const SUBHD_SEARCH_TIMEOUT_MS = 24000;
 const SUBHD_SESSION_RETRY_DELAY_MS = 350;
 const RESULT_CACHE = new Map();
 const SUBTITLE_PAYLOAD_CACHE = new Map();
-const STRICT_CATALOG_SOURCE_KEYS = new Set(["subtitlecat", "avsubtitles", "aiyi"]);
+const STRICT_CATALOG_SOURCE_KEYS = new Set(["thunder", "subtitlecat", "avsubtitles", "aiyi"]);
 const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const SEARCH_CACHE_PARTIAL_TTL_MS = 5 * 60 * 1000;
 const SUBTITLE_PAYLOAD_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -404,6 +404,7 @@ async function handleSearch(req, url, res) {
     // 本地扫描传来的标准码保持保守，手动输入才允许 abc123 这类紧凑小写号码。
     allowLooseCode: !requestedCatalogCode,
   });
+  const hasLocalVideo = Boolean(requestedVideoFileName) && url.searchParams.get("remote115") !== "1";
 
   if (!query) {
     sendJson(res, 400, { error: "请输入搜索字段或文件名" });
@@ -432,6 +433,7 @@ async function handleSearch(req, url, res) {
     videoFileName,
     releaseName,
     catalogCode: catalogIdentity?.canonicalCode || "",
+    catalogSearchMode: catalogIdentity ? (hasLocalVideo ? "video-name" : "catalog-code") : undefined,
     videoDurationMs,
     metadataAliases,
     assrtToken,
@@ -450,7 +452,7 @@ async function handleSearch(req, url, res) {
     query,
     queryVariants,
     videoFileName,
-    hasLocalVideo: Boolean(requestedVideoFileName),
+    hasLocalVideo,
     catalogIdentity,
   });
   const selectedSources = buildSelectedSearchSources({
@@ -478,7 +480,7 @@ async function handleSearch(req, url, res) {
     }
     const episodeResults = filterResultsByEpisode(item.value.results.filter(Boolean), requestedEpisode);
     const details = { catalogMismatchCount: 0, catalogUnknownCount: 0 };
-    const results = filterResultsByCatalogIdentity(episodeResults, catalogIdentity, selectedSources[index], details);
+    const results = filterResultsByCatalogIdentity(episodeResults, catalogIdentity, selectedSources[index].key, details);
     return {
       results,
       sourceCount: episodeResults.length,
@@ -558,6 +560,7 @@ function buildSearchCacheKey(options) {
     videoFileName: options.videoFileName,
     releaseName: options.releaseName,
     catalogCode: options.catalogCode,
+    catalogSearchMode: options.catalogSearchMode,
     videoDurationMs: options.videoDurationMs,
     metadataAliases: [...(options.metadataAliases || [])].map((item) => item.normalize("NFKC").toLowerCase()).sort(),
     tokenDigest,
@@ -728,7 +731,7 @@ export function buildSelectedSearchSources({
       search: (sourceLimit) => searchWithQueryVariants(
         thunderQueryVariants.length ? thunderQueryVariants : queryVariants,
         sourceLimit,
-        (variant) => searchThunder(variant, sourceLimit, request)
+        (variant) => searchThunder(variant, sourceLimit, request, { useQueryAsTitle: !catalogIdentity })
       ),
     },
     {
@@ -746,7 +749,6 @@ export function buildSelectedSearchSources({
     {
       key: "subtitlecat",
       name: "SubtitleCat",
-      strictCatalogIdentity: Boolean(catalogIdentity),
       search: (sourceLimit) => searchWithQueryVariants(
         catalogVariants.length ? catalogVariants : queryVariants,
         sourceLimit,
@@ -784,14 +786,12 @@ export function buildSelectedSearchSources({
       key: "avsubtitles",
       name: "AVSubtitles",
       timeoutMs: 16000,
-      strictCatalogIdentity: Boolean(catalogIdentity),
       search: (sourceLimit) => catalogIdentity ? searchAvSubtitles(catalogIdentity.canonicalCode, language, sourceLimit) : [],
     },
     {
       key: "aiyi",
       name: "爱译网",
       timeoutMs: 12000,
-      strictCatalogIdentity: Boolean(catalogIdentity),
       search: (sourceLimit) => catalogIdentity ? searchAiyi(catalogIdentity.canonicalCode, language, sourceLimit) : [],
     },
   ];
@@ -1782,7 +1782,7 @@ function pruneSubtitlePayloadCache() {
   }
 }
 
-export async function searchThunder(query, limit, request = fetchWithTimeout) {
+export async function searchThunder(query, limit, request = fetchWithTimeout, { useQueryAsTitle = true } = {}) {
   /*
    * ================================================================================
    * 步骤6：查询迅雷字幕源
@@ -1804,13 +1804,13 @@ export async function searchThunder(query, limit, request = fetchWithTimeout) {
   // 6.2 转换结果
   const list = Array.isArray(json?.data) ? json.data : [];
   const results = list.slice(0, limit).map((item) => {
-    const title = repairMojibakeText(item.name || query);
+    const title = repairMojibakeText(item.name || (useQueryAsTitle ? query : item.extra_name) || "");
     const durationMs = Number(item.duration || 0);
     return {
       source: "thunder",
       sourceLabel: "迅雷字幕",
       title,
-      fileName: sanitizeFileName(title || `${query}.${item.ext || "srt"}`),
+      fileName: sanitizeFileName(title || `${useQueryAsTitle ? query : "subtitle"}.${item.ext || "srt"}`),
       ext: item.ext || "srt",
       language: Array.isArray(item.languages) ? item.languages.filter(Boolean).map(repairMojibakeText).join(", ") : "",
       score: Number(item.score || item.fingerprintf_score || 0),
@@ -4239,7 +4239,7 @@ function parseResultDurationMs(value) {
  * 1) 番号模式拒绝能提取出其他标准码的候选
  * 2) 保留指纹命中和没有可提取号码的通用来源结果
  */
-function filterResultsByCatalogIdentity(results, catalogIdentity, sourceItem = null, details = {}) {
+function filterResultsByCatalogIdentity(results, catalogIdentity, sourceKey, details = {}) {
   logger.info("开始按番号身份过滤结果...");
 
   // 7.05.1 非番号搜索不改变来源结果。
@@ -4258,7 +4258,7 @@ function filterResultsByCatalogIdentity(results, catalogIdentity, sourceItem = n
       details.catalogMismatchCount = Number(details.catalogMismatchCount || 0) + 1;
       continue;
     }
-    if (!catalogState.match && sourceItem?.strictCatalogIdentity && !result.fingerprintMatch) {
+    if (!catalogState.match && STRICT_CATALOG_SOURCE_KEYS.has(sourceKey) && !result.fingerprintMatch) {
       result.catalogMatch = false;
       result.catalogMismatchReason = "未识别候选番号";
       details.catalogUnknownCount = Number(details.catalogUnknownCount || 0) + 1;
