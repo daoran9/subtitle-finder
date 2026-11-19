@@ -1,4 +1,4 @@
-import { analyzeMediaFile, compareMediaEntries, findExistingSubtitles } from "./media-library.js";
+import { analyzeMediaFile, compareMediaEntries, findExistingSubtitles, formatMediaDuration } from "./media-library.js";
 import { analyzeSubtitleLanguage, buildSubtitleBaseName } from "./subtitle-rules.js";
 import { parseCustomConversionDictionary } from "./conversion-dictionary.js";
 import { parseScanExclusionRules } from "./scan-rules.js";
@@ -6,6 +6,8 @@ import { initDrive115 } from "./drive115.js";
 
 const state = {
   results: [],
+  lastSearchQuery: "",
+  showOtherSearchResults: false,
   selectedId: "",
   selectedDownloadIds: new Set(),
   previewText: "",
@@ -26,13 +28,19 @@ const state = {
   assrtToken: "",
   batchTasks: [],
   batchStatus: "idle",
+  batchSaving: false,
   batchRunId: 0,
   batchControllers: new Map(),
   searchController: null,
+  searchRankingController: null,
   searchRunId: 0,
   previewController: null,
   conversionTarget: "",
+  autoConvertChinese: false,
+  preferredChinese: "zh-CN",
   scanExclusionRules: [],
+  subtitleExclusionKeywords: "",
+  subtitleSaveFilter: {},
   customDictionary: "",
   singleVideoMode: false,
   batchStateLoaded: false,
@@ -69,6 +77,7 @@ const nodes = {
   aboutUpdateLink: document.querySelector("#aboutUpdateLink"),
   updateStatus: document.querySelector("#updateStatus"),
   resultSummary: document.querySelector("#resultSummary"),
+  showOtherSearchResults: document.querySelector("#showOtherSearchResults"),
   statusBadge: document.querySelector("#statusBadge"),
   sourceStats: document.querySelector("#sourceStats"),
   resultsBody: document.querySelector("#resultsBody"),
@@ -99,7 +108,12 @@ const nodes = {
   settingsMessage: document.querySelector("#settingsMessage"),
   settingsPlatformLabel: document.querySelector("#settingsPlatformLabel"),
   scanExclusionRules: document.querySelector("#scanExclusionRulesInput"),
+  subtitleExclusionKeywords: document.querySelector("#subtitleExclusionKeywordsInput"),
+  subtitleSaveFilterEnabled: document.querySelector("#subtitleSaveFilterEnabled"),
+  subtitleSaveFilterKeywords: document.querySelector("#subtitleSaveFilterKeywords"),
   customDictionary: document.querySelector("#customDictionaryInput"),
+  autoConvertChinese: document.querySelector("#autoConvertChinese"),
+  preferredChinese: document.querySelector("#preferredChineseSelect"),
   selectVideoButton: document.querySelector("#selectVideoButton"),
   scanVideoButton: document.querySelector("#scanVideoButton"),
   batchPanel: document.querySelector("#batchPanel"),
@@ -111,6 +125,15 @@ const nodes = {
   batchNamingPreset: document.querySelector("#batchNamingPreset"),
   cloudBatchNaming: document.querySelector("#cloudBatchNaming"),
   batchConcurrency: document.querySelector("#batchConcurrencySelect"),
+  batchMode: document.querySelector("#batchModeSelect"),
+  batchIncludeLabel: document.querySelector("#batchIncludeLabel"),
+  batchIncludeExisting: document.querySelector("#batchIncludeExisting"),
+  openBatchReview: document.querySelector("#openBatchReview"),
+  batchReviewModal: document.querySelector("#batchReviewModal"),
+  batchReviewList: document.querySelector("#batchReviewList"),
+  batchReviewProgress: document.querySelector("#batchReviewProgress"),
+  closeBatchReview: document.querySelector("#closeBatchReview"),
+  saveBatchReview: document.querySelector("#saveBatchReview"),
   assrtToken: document.querySelector("#assrtTokenInput"),
   videoScanMeta: document.querySelector("#videoScanMeta"),
   videoScanSummary: document.querySelector("#videoScanSummary"),
@@ -170,9 +193,8 @@ nodes.clearQueryButton.addEventListener("click", () => {
 });
 
 nodes.query.addEventListener("input", () => {
-  if (drive115UI.video && nodes.query.value.trim() !== drive115UI.video.query) drive115UI.clearTarget();
   const activeVideo = getActiveVideo();
-  if (activeVideo && nodes.query.value.trim() !== activeVideo.query) {
+  if (activeVideo && !activeVideo.remote115 && nodes.query.value.trim() !== activeVideo.query) {
     clearActiveVideoSelection();
   }
   renderClearQueryButton();
@@ -268,6 +290,12 @@ nodes.selectAllResults.addEventListener("change", () => {
   toggleSelectAllResults();
 });
 
+nodes.showOtherSearchResults.addEventListener("click", () => {
+  state.showOtherSearchResults = !state.showOtherSearchResults;
+  renderResults(state.results);
+  setActiveRow(state.selectedId);
+});
+
 // 1.8 绑定保存位置选择
 nodes.chooseDirButton.addEventListener("click", async () => {
   await chooseDownloadDir();
@@ -304,6 +332,26 @@ nodes.retryBatchButton.addEventListener("click", () => {
   void retryBatchMatch();
 });
 
+nodes.batchMode.addEventListener("change", renderBatchMatchState);
+nodes.batchIncludeExisting.addEventListener("change", renderBatchMatchState);
+nodes.openBatchReview.addEventListener("click", openBatchReview);
+nodes.closeBatchReview.addEventListener("click", closeBatchReview);
+nodes.saveBatchReview.addEventListener("click", () => { void saveBatchReview(); });
+nodes.batchReviewModal.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeBatchReview();
+  }
+  if (event.key === "Tab") {
+    const focusable = [...nodes.batchReviewModal.querySelectorAll("summary, button:not(:disabled), input:not(:disabled)")]
+      .filter((element) => element.getClientRects().length);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  }
+});
+
 nodes.namingPreset.addEventListener("change", () => {
   state.namingPreset = nodes.namingPreset.value || "media-server";
   localStorage.setItem("subtitle-finder-naming-preset", state.namingPreset);
@@ -323,7 +371,7 @@ nodes.assrtToken.addEventListener("input", () => {
 nodes.language.addEventListener("change", () => {
   pauseBatchMatch();
   state.videoFiles = normalizeScannedVideoFiles(state.videoFiles);
-  syncConversionControl();
+  syncConversionControl(state.autoConvertChinese);
   renderVideoFiles();
   scheduleBatchStateSave();
 });
@@ -405,7 +453,7 @@ async function checkForUpdates() {
   }
 }
 
-async function searchSubtitles() {
+async function searchSubtitles(searchQuery) {
   /*
    * ================================================================================
    * 步骤2：执行字幕搜索
@@ -416,18 +464,20 @@ async function searchSubtitles() {
    * 3) 渲染结果表格
    */
   logger.info("开始搜索字幕...");
+  await settingsReadyPromise;
+  if (state.autoConvertChinese) syncConversionControl(true);
 
   // 2.1 建立本次搜索归属，并立即取消上一次网络等待
   const searchRunId = state.searchRunId + 1;
   state.searchRunId = searchRunId;
+  state.searchRankingController?.abort();
   if (state.searchController) {
     state.searchController.abort();
     logger.info("已取消上一轮搜索等待");
   }
 
   // 2.2 读取搜索条件
-  const query = nodes.query.value.trim();
-  if (drive115UI.video && query !== drive115UI.video.query) drive115UI.clearTarget();
+  const query = searchQuery ?? nodes.query.value.trim();
   const source = nodes.source.value;
   const language = nodes.language.value;
   if (!query) {
@@ -440,6 +490,9 @@ async function searchSubtitles() {
   // 2.3 选择本地视频时补齐指纹和内封字幕信息
   setStatus("搜索中", "busy");
   nodes.resultSummary.textContent = `搜索 ${query}`;
+  state.lastSearchQuery = query;
+  state.showOtherSearchResults = false;
+  nodes.showOtherSearchResults.hidden = true;
   state.results = [];
   state.selectedDownloadIds.clear();
   syncSelectAllResults();
@@ -449,7 +502,12 @@ async function searchSubtitles() {
   clearPreview();
 
   try {
-    const activeVideo = getActiveVideo() || drive115UI.video;
+    const localVideo = getActiveVideo();
+    const cloudTarget = drive115UI.video;
+    // 手动改词时仍保存到所选云盘视频，但搜索按新输入匹配。
+    const activeVideo = cloudTarget
+      ? (query === cloudTarget.query ? cloudTarget : null)
+      : (localVideo?.remote115 ? null : localVideo);
     if ((source === "shooter" || source === "thunder-fingerprint") && !activeVideo) {
       throw new Error("该字幕源需要先从视频文件夹选择一个本地视频");
     }
@@ -486,13 +544,54 @@ async function searchSubtitles() {
     // 2.5 只由最新搜索渲染结果
     state.results = data.results || [];
     addRecent(query);
-    renderResults(state.results);
+    const filterEnabled = state.subtitleSaveFilter.enabled;
+    if (!filterEnabled || !state.results.length) {
+      renderResults(state.results);
+    } else {
+      nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">正在校验字幕正文…</td></tr>`;
+    }
     renderSourceStats(data.sourceStats || []);
     const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
     setStatus(errorCount ? "部分完成" : "完成", errorCount ? "warn" : "ok");
     const cacheLabel = data.cached ? " · 缓存" : "";
-    nodes.resultSummary.textContent = errorCount ? `${data.count} 条结果 · ${errorCount} 个源失败${cacheLabel}` : `${data.count} 条结果${cacheLabel}`;
-    logger.info(`搜索字幕完成: ${data.count} 条`);
+    const errorLabel = errorCount ? ` · ${errorCount} 个源失败` : "";
+    const updateSummary = (count, excluded, progress = "", filtered = false) => {
+      const filterLabel = excluded ? ` · 关键词排除 ${excluded} 条` : "";
+      const countLabel = filtered ? `${count} 条命中保存特征` : `${count} 条结果`;
+      nodes.resultSummary.textContent = `${countLabel}${errorLabel}${filterLabel}${cacheLabel}${progress}`;
+    };
+    const excludedByTitle = Number(data.excludedCount || 0);
+    updateSummary(state.results.length, excludedByTitle);
+    if (!state.results.length) return;
+
+    const controller = new AbortController();
+    state.searchRankingController = controller;
+    updateSummary(state.results.length, excludedByTitle, ` · 校验正文 0/${state.results.length}`);
+    try {
+      const checks = await checkSubtitleCandidates(state.results, {
+        language,
+        videoDurationMs: Number(videoInfo.videoDurationMs || activeVideo?.videoDurationMs || 0),
+      }, controller, (done, total) => {
+        updateSummary(state.results.length, excludedByTitle, ` · 校验正文 ${done}/${total}`);
+      });
+      if (controller.signal.aborted || state.searchRunId !== searchRunId) return;
+      const visible = checks.filter(({ result, data }) => {
+        if (!data?.excluded) return true;
+        state.selectedDownloadIds.delete(result.id);
+        return false;
+      });
+      state.results = visible.sort(compareCheckedSubtitles).map(({ result, data }) => ({
+        ...result,
+        recommendationLabel: data?.valid ? subtitleRecommendationLabel(data) : "",
+        saveRestriction: data?.saveRestriction || (filterEnabled && !data?.valid ? "未能核对保存特征" : ""),
+      }));
+      renderResults(state.results);
+      setActiveRow(state.selectedId);
+      updateSummary(state.results.filter(canSelectSearchResult).length, excludedByTitle + checks.length - visible.length, "", filterEnabled);
+    } finally {
+      if (state.searchRankingController === controller) state.searchRankingController = null;
+    }
+    logger.info(`搜索字幕完成: ${state.results.length} 条`);
   } catch (error) {
     // 2.6 被新搜索替换的旧任务不再改写当前结果栏
     if (state.searchRunId !== searchRunId) {
@@ -626,6 +725,7 @@ async function fetchWithController(url, options = {}) {
   let timedOut = false;
   const abortRequest = () => requestController.abort();
   taskController.signal.addEventListener("abort", abortRequest, { once: true });
+  if (taskController.signal.aborted) abortRequest();
   const timer = setTimeout(() => {
     timedOut = true;
     requestController.abort();
@@ -656,10 +756,18 @@ function renderResults(results) {
    * 2) 给每一行绑定预览动作
    */
   logger.info("开始渲染搜索结果...");
+  const matches = results.filter(canSelectSearchResult);
+  const otherCount = results.length - matches.length;
+  const expanded = state.showOtherSearchResults && otherCount > 0;
+  nodes.showOtherSearchResults.hidden = otherCount === 0;
+  nodes.showOtherSearchResults.setAttribute("aria-expanded", String(expanded));
+  nodes.showOtherSearchResults.textContent = expanded ? "隐藏其他字幕" : `显示其他 ${otherCount} 条`;
+  const displayed = expanded ? results : matches;
 
   // 3.1 处理空结果
-  if (!results.length) {
-    nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">没有找到字幕。</td></tr>`;
+  if (!displayed.length) {
+    const message = otherCount ? "没有字幕命中保存特征。" : "没有找到字幕。";
+    nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">${message}</td></tr>`;
     syncSelectAllResults();
     renderBatchDownloadState();
     logger.info("渲染搜索结果完成: empty");
@@ -667,14 +775,16 @@ function renderResults(results) {
   }
 
   // 3.2 生成结果行
-  nodes.resultsBody.innerHTML = results
+  nodes.resultsBody.innerHTML = displayed
     .map((item) => {
-      const meta = [item.size, item.duration, item.extra].filter(Boolean).join(" · ");
-      const checked = state.selectedDownloadIds.has(item.id) ? "checked" : "";
+      const details = [item.size, item.duration, item.extra].filter(Boolean).join(" · ");
+      const meta = [details || item.fileName, item.recommendationLabel, item.saveRestriction].filter(Boolean).join(" · ");
+      const selectable = canSelectSearchResult(item);
+      const selection = selectable ? (state.selectedDownloadIds.has(item.id) ? "checked" : "") : "disabled";
       return `
         <tr data-id="${escapeHtml(item.id)}">
           <td class="select-cell">
-            <input type="checkbox" data-select="${escapeHtml(item.id)}" title="选择下载" ${checked} />
+            <input type="checkbox" data-select="${escapeHtml(item.id)}" title="选择下载" ${selection} />
           </td>
           <td class="source-cell"><span class="source-pill">${escapeHtml(item.sourceLabel)}</span></td>
           <td class="file-cell" data-preview-cell="${escapeHtml(item.id)}">
@@ -682,7 +792,7 @@ function renderResults(results) {
               <span class="file-title">${escapeHtml(item.title)}</span>
               <span class="preview-hint">查看</span>
             </button>
-            <div class="file-meta">${escapeHtml(meta || item.fileName)}</div>
+            <div class="file-meta">${escapeHtml(meta)}</div>
             <div class="mobile-result-metrics" aria-hidden="true">
               <span>${escapeHtml(item.language || "-")}</span>
               <span>下载 ${escapeHtml(String(item.downloads || "-"))}</span>
@@ -727,6 +837,10 @@ function renderResults(results) {
   syncSelectAllResults();
   renderBatchDownloadState();
   logger.info("渲染搜索结果完成");
+}
+
+function canSelectSearchResult(result) {
+  return !state.subtitleSaveFilter.enabled || !result.saveRestriction;
 }
 
 function renderSourceStats(stats) {
@@ -793,7 +907,7 @@ function toggleSelectAllResults() {
 
   // 5.1 更新选择集合
   if (nodes.selectAllResults.checked) {
-    state.results.forEach((item) => state.selectedDownloadIds.add(item.id));
+    state.results.filter(canSelectSearchResult).forEach((item) => state.selectedDownloadIds.add(item.id));
   } else {
     state.selectedDownloadIds.clear();
   }
@@ -805,8 +919,9 @@ function toggleSelectAllResults() {
 
 function syncSelectAllResults() {
   // 5.3 同步全选框状态
-  const total = state.results.length;
-  const selected = state.results.filter((item) => state.selectedDownloadIds.has(item.id)).length;
+  const eligible = state.results.filter(canSelectSearchResult);
+  const total = eligible.length;
+  const selected = eligible.filter((item) => state.selectedDownloadIds.has(item.id)).length;
   nodes.selectAllResults.disabled = total === 0;
   nodes.selectAllResults.checked = total > 0 && selected === total;
   nodes.selectAllResults.indeterminate = selected > 0 && selected < total;
@@ -814,7 +929,7 @@ function syncSelectAllResults() {
 
 function renderBatchDownloadState() {
   // 5.4 更新批量下载按钮状态
-  const count = state.results.filter((item) => state.selectedDownloadIds.has(item.id)).length;
+  const count = state.results.filter((item) => canSelectSearchResult(item) && state.selectedDownloadIds.has(item.id)).length;
   nodes.batchDownloadButton.textContent = count ? `下载 ${count} 个` : "批量下载";
   nodes.batchDownloadButton.setAttribute("aria-disabled", count ? "false" : "true");
 }
@@ -832,8 +947,7 @@ function clearSearchQuery() {
 
   // 5.1 清空输入并恢复焦点
   nodes.query.value = "";
-  drive115UI.clearTarget();
-  clearActiveVideoSelection();
+  if (!getActiveVideo()?.remote115) clearActiveVideoSelection();
   nodes.query.focus();
   renderClearQueryButton();
 
@@ -868,7 +982,13 @@ async function openSettingsDialog() {
   await settingsReadyPromise;
   nodes.matchVideoName.checked = state.matchVideoName;
   nodes.scanExclusionRules.value = state.scanExclusionRules.join("\n");
+  nodes.subtitleExclusionKeywords.value = state.subtitleExclusionKeywords;
+  const filter = state.subtitleSaveFilter;
+  nodes.subtitleSaveFilterEnabled.checked = Boolean(filter.enabled);
+  nodes.subtitleSaveFilterKeywords.value = filter.keywords || "";
   nodes.customDictionary.value = state.customDictionary;
+  nodes.autoConvertChinese.checked = state.autoConvertChinese;
+  nodes.preferredChinese.value = state.preferredChinese;
   nodes.settingsPlatformLabel.textContent = window.subtitleFinder.platform === "android" ? "Android 扫描、转换与保存" : "Windows 扫描、转换与保存";
   nodes.contextMenuSetting.hidden = !window.subtitleFinder.getContextMenuState;
   if (window.subtitleFinder.getContextMenuState) {
@@ -939,7 +1059,14 @@ async function saveSettings() {
         settings: {
           matchVideoName: nodes.matchVideoName.checked,
           scanExclusionRules,
+          subtitleExclusionKeywords: nodes.subtitleExclusionKeywords.value,
+          subtitleSaveFilter: {
+            enabled: nodes.subtitleSaveFilterEnabled.checked,
+            keywords: nodes.subtitleSaveFilterKeywords.value,
+          },
           customDictionary: nodes.customDictionary.value,
+          autoConvertChinese: nodes.autoConvertChinese.checked,
+          preferredChinese: nodes.preferredChinese.value,
         },
       }),
     });
@@ -947,7 +1074,14 @@ async function saveSettings() {
     if (!response.ok) throw new Error(data.detail || data.error || "设置保存失败");
     state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
+    state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
+    const nextFilter = data.settings?.subtitleSaveFilter || {};
+    const filterChanged = (state.subtitleSaveFilter.enabled || nextFilter.enabled)
+      && JSON.stringify(state.subtitleSaveFilter) !== JSON.stringify(nextFilter);
+    state.subtitleSaveFilter = nextFilter;
     state.customDictionary = String(data.settings?.customDictionary || "");
+    const previousConversion = state.conversionTarget;
+    applyChinesePreferences(data.settings);
     drive115UI.render();
     renderBatchMatchState();
 
@@ -961,7 +1095,9 @@ async function saveSettings() {
     nodes.settingsMessage.textContent = "已保存";
     nodes.settingsMessage.dataset.tone = "ok";
     setStatus("设置已保存", "ok");
-    if (state.selectedId && state.conversionTarget) {
+    if (filterChanged && state.lastSearchQuery && (state.results.length || state.searchController)) {
+      void searchSubtitles(state.lastSearchQuery);
+    } else if (state.selectedId && (state.conversionTarget || previousConversion)) {
       void previewSubtitle(state.selectedId, { preserveSelection: true });
     }
     logger.info("保存设置完成");
@@ -1089,10 +1225,18 @@ async function previewSubtitle(id, options = {}) {
     if (state.conversionTarget) params.set("convert", state.conversionTarget);
     const response = await fetch(apiUrl(`/api/preview?${params.toString()}`), { signal: controller.signal });
     const data = await response.json();
+    if (state.previewController !== controller) return;
+    if (data.excluded) {
+      state.previewText = "";
+      nodes.previewText.textContent = data.detail;
+      nodes.previewMeta.textContent = "已按关键词排除";
+      renderSubtitleSyncState();
+      setStatus("已排除", "warn");
+      return;
+    }
     if (!response.ok) throw new Error(data.detail || data.error || "预览失败");
 
     // 4.4 更新预览面板
-    if (state.previewController !== controller) return;
     state.previewText = data.text || "";
     nodes.previewText.textContent = state.previewText || "字幕内容为空。";
     const validation = data.validation || {};
@@ -1103,6 +1247,7 @@ async function previewSubtitle(id, options = {}) {
     state.downloadUrl = absoluteApiUrl(`/api/download?${params.toString()}`);
     state.downloadFileName = data.fileName || "subtitle.srt";
     setDownloadButtonAvailable(true);
+    if (data.saveRestriction) showPreviewFeedback(data.saveRestriction, "warn");
     renderSubtitleSyncState();
     setStatus("已读取", "ok");
     logger.info("预览字幕完成");
@@ -1526,7 +1671,7 @@ async function downloadSelectedSubtitles() {
   logger.info("开始批量下载字幕文件...");
 
   // 6.1 校验选择状态
-  const selectedItems = state.results.filter((item) => state.selectedDownloadIds.has(item.id));
+  const selectedItems = state.results.filter((item) => canSelectSearchResult(item) && state.selectedDownloadIds.has(item.id));
   if (!selectedItems.length || nodes.batchDownloadButton.getAttribute("aria-disabled") === "true") {
     setStatus("未选择", "warn");
     logger.info("批量下载字幕文件完成: empty");
@@ -1765,8 +1910,7 @@ async function scanVideoFolder() {
   state.activeVideoPath = "";
   state.singleVideoMode = false;
   state.videoDirectoryLabel = String(result.label || result.directory || "");
-  state.batchTasks = [];
-  state.batchStatus = "idle";
+  resetBatchMatch();
   state.videoDirectoryId = String(result.directory || result.label || "");
   renderVideoFiles();
   renderBatchMatchState();
@@ -1809,6 +1953,7 @@ async function loadVideoSelectionResult(result, options = {}) {
    * 2) 单视频模式不创建文件夹批量任务
    */
   logger.info("开始载入视频选择结果...");
+  if (state.batchSaving) return false;
 
   // 7.3.1 处理取消和平台错误
   if (!(result && result.selected)) {
@@ -1823,14 +1968,14 @@ async function loadVideoSelectionResult(result, options = {}) {
   }
 
   // 7.3.2 写入视频状态并选中目标
+  closeBatchReview();
   drive115UI.clearTarget();
   state.batchStateTouched = true;
   state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
   state.videoDirectoryLabel = String(result.label || result.directory || "");
   state.videoDirectoryId = options.singleVideo || options.cloud115 ? "" : String(result.directory || result.label || "");
   state.singleVideoMode = Boolean(options.singleVideo);
-  state.batchTasks = [];
-  state.batchStatus = "idle";
+  resetBatchMatch();
   const selectedVideo = result.videoPath
     ? state.videoFiles.find((item) => item.path === result.videoPath) || state.videoFiles[0]
     : options.singleVideo ? state.videoFiles[0] : null;
@@ -1940,11 +2085,13 @@ function renderVideoFiles() {
             ? "matched"
             : "missing";
       const activeClass = item.path === state.activeVideoPath ? " is-active" : "";
+      const duration = formatMediaDuration(item.durationMs || item.videoDurationMs);
       const mediaSummary = [task?.message || item.query || item.name || "", item.nfoMetadata ? "NFO" : ""].filter(Boolean).join(" · ");
       return `
       <button class="video-file-button${activeClass}" type="button" data-video-index="${index}" title="${escapeHtml(title)}">
         <span class="video-file-line">
           <strong>${escapeHtml(item.name || item.query || "video")}</strong>
+          ${duration ? `<span class="video-file-duration" title="视频时长">${duration}</span>` : ""}
           <b class="video-file-status" data-status="${statusTone}">${escapeHtml(statusLabel)}</b>
         </span>
         <small>${escapeHtml(mediaSummary)}</small>
@@ -2063,6 +2210,7 @@ function getVideoStatusLabel(video, task) {
   const taskLabels = {
     pending: "待处理",
     searching: "搜索中",
+    ready: "待选择",
     saved: "已保存",
     "no-result": "无结果",
     failed: "失败",
@@ -2144,7 +2292,10 @@ async function restoreAppSettings() {
     if (!response.ok) throw new Error(data.detail || data.error || "设置读取失败");
     state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
+    state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
+    state.subtitleSaveFilter = data.settings?.subtitleSaveFilter || {};
     state.customDictionary = String(data.settings?.customDictionary || "");
+    applyChinesePreferences(data.settings);
     drive115UI.render();
     logger.info("恢复通用设置完成", state.scanExclusionRules.length);
   } catch (error) {
@@ -2154,7 +2305,32 @@ async function restoreAppSettings() {
   }
 }
 
-function syncConversionControl() {
+function applyChinesePreferences(settings) {
+  const preferred = settings?.preferredChinese === "zh-TW" ? "zh-TW" : "zh-CN";
+  const automatic = settings?.autoConvertChinese === true;
+  const preferenceChanged = preferred !== state.preferredChinese;
+  const reset = preferenceChanged || automatic !== state.autoConvertChinese;
+  state.preferredChinese = preferred;
+  state.autoConvertChinese = automatic;
+  if (preferenceChanged && isChineseLanguage(nodes.language.value)) {
+    nodes.language.value = preferred;
+    if (state.batchStatus !== "running" && state.videoFiles.length) {
+      state.videoFiles = normalizeScannedVideoFiles(state.videoFiles);
+      renderVideoFiles();
+    }
+  }
+  syncConversionControl(reset);
+}
+
+function isChineseLanguage(language) {
+  return language === "zh-CN" || language === "zh-TW";
+}
+
+function automaticConversionFor(language) {
+  return state.autoConvertChinese && isChineseLanguage(language) ? state.preferredChinese : "";
+}
+
+function syncConversionControl(reset = false) {
   /*
    * ================================================================================
    * 步骤11.4：同步简繁转换状态
@@ -2166,11 +2342,11 @@ function syncConversionControl() {
   logger.info("开始同步简繁转换状态...");
 
   // 11.4.1 非中文语言恢复原文并禁用控件
-  const chineseMode = nodes.language.value === "zh-CN" || nodes.language.value === "zh-TW";
+  const chineseMode = isChineseLanguage(nodes.language.value);
   nodes.conversionSelect.disabled = !chineseMode;
-  if (!chineseMode) {
-    state.conversionTarget = "";
-    nodes.conversionSelect.value = "";
+  if (!chineseMode || reset) {
+    state.conversionTarget = automaticConversionFor(nodes.language.value);
+    nodes.conversionSelect.value = state.conversionTarget;
   }
 
   logger.info("同步简繁转换状态完成", chineseMode ? "enabled" : "disabled");
@@ -2189,6 +2365,7 @@ async function restorePersistentBatchState() {
 
   // 11.5.1 等待 Windows 或 Android 内置服务
   try {
+    await settingsReadyPromise;
     const ready = await waitForLocalService();
     if (!ready) {
       state.batchStateLoaded = true;
@@ -2203,7 +2380,7 @@ async function restorePersistentBatchState() {
     const saved = data.state;
     if (!state.batchStateTouched && saved && Array.isArray(saved.videoFiles) && saved.videoFiles.length) {
       if (["zh-CN", "zh-TW", "en", "ja"].includes(saved.language)) nodes.language.value = saved.language;
-      syncConversionControl();
+      syncConversionControl(state.autoConvertChinese);
       state.videoDirectoryId = String(saved.videoDirectoryId || "");
       state.videoDirectoryLabel = String(saved.videoDirectoryLabel || "");
       state.videoFiles = normalizeScannedVideoFiles(saved.videoFiles);
@@ -2310,13 +2487,14 @@ async function savePersistentBatchState(options = {}) {
     batchTasks: state.batchTasks.map((task) => ({
       id: task.id,
       videoPath: task.videoPath,
-      status: task.status,
-      message: task.message,
+      status: task.status === "ready" ? "pending" : task.status,
+      message: task.status === "ready" ? "等待重新搜索候选" : task.message,
+      includeExisting: task.includeExisting,
       savedPath: task.savedPath,
       retryCount: task.retryCount || 0,
       updatedAt: task.updatedAt || Date.now(),
     })),
-    batchStatus: state.batchStatus,
+    batchStatus: state.batchTasks.some((task) => task.status === "ready") ? "paused" : state.batchStatus,
     namingPreset: state.namingPreset,
     batchConcurrency: state.batchConcurrency,
     language: nodes.language.value,
@@ -2393,6 +2571,13 @@ function updateVideoInspectionState(video, inspection) {
   video.hasSubtitle = Boolean(video.hasExternalSubtitle || video.hasEmbeddedSubtitle);
 }
 
+function resetBatchMatch() {
+  state.batchTasks = [];
+  state.batchStatus = "idle";
+  nodes.batchMode.value = "review";
+  nodes.batchIncludeExisting.checked = false;
+}
+
 async function startOrResumeBatchMatch() {
   /*
    * ================================================================================
@@ -2403,10 +2588,11 @@ async function startOrResumeBatchMatch() {
    * 2) 按用户设置的并发数搜索并保存
    */
   logger.info("开始启动或继续批量匹配...");
+  await settingsReadyPromise;
   state.batchStateTouched = true;
 
   // 13.1 校验原生分析和保存能力
-  if (state.batchStatus === "running") {
+  if (state.batchStatus === "running" || state.batchSaving) {
     logger.info("启动或继续批量匹配完成: already running");
     return;
   }
@@ -2421,14 +2607,17 @@ async function startOrResumeBatchMatch() {
     return;
   }
 
+  const mode = nodes.batchMode.value;
   // 13.2 首次运行或全部完成后重建缺字幕任务
   if (!state.batchTasks.length || state.batchStatus === "idle" || state.batchStatus === "completed") {
+    const includeExisting = mode === "review" && nodes.batchIncludeExisting.checked;
     state.batchTasks = state.videoFiles
-      .filter((video) => !video.hasSubtitle)
+      .filter((video) => includeExisting || !video.hasSubtitle)
       .map((video, index) => ({
         id: `${Date.now()}-${index}`,
         videoPath: video.path,
         status: "pending",
+        includeExisting,
         message: "",
         result: null,
         savedPath: "",
@@ -2450,18 +2639,19 @@ async function startOrResumeBatchMatch() {
   state.batchRunId = runId;
   renderBatchMatchState();
   const workerCount = Math.min(state.batchConcurrency, pending.length);
-  await Promise.all(Array.from({ length: workerCount }, () => runBatchWorker(runId)));
+  await Promise.all(Array.from({ length: workerCount }, () => runBatchWorker(runId, mode)));
 
   // 13.4 所有工作线程结束后更新状态
   if (state.batchRunId === runId && state.batchStatus === "running") {
     state.batchStatus = "completed";
     renderBatchMatchState();
     renderVideoFiles();
+    if (mode === "review" && !nodes.openBatchReview.hidden) openBatchReview();
   }
   logger.info("启动或继续批量匹配完成");
 }
 
-async function runBatchWorker(runId) {
+async function runBatchWorker(runId, mode) {
   // 13.5 每个工作线程循环领取一个待处理任务
   while (state.batchStatus === "running" && state.batchRunId === runId) {
     const task = state.batchTasks.find((candidate) => candidate.status === "pending");
@@ -2471,11 +2661,11 @@ async function runBatchWorker(runId) {
     task.updatedAt = Date.now();
     renderBatchMatchState();
     renderVideoFiles();
-    await processBatchTask(task, runId);
+    await processBatchTask(task, runId, mode);
   }
 }
 
-async function processBatchTask(task, runId) {
+async function processBatchTask(task, runId, mode) {
   /*
    * ================================================================================
    * 步骤14：处理单个视频任务
@@ -2497,12 +2687,13 @@ async function processBatchTask(task, runId) {
     return;
   }
 
+  let controller;
   try {
     task.phase = "inspect";
     const inspection = video.remote115 ? {} : await inspectVideoForSearch(video);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
     updateVideoInspectionState(video, inspection);
-    if (video.hasEmbeddedSubtitle) {
+    if (video.hasEmbeddedSubtitle && (mode === "single" || !task.includeExisting)) {
       task.status = "skipped";
       task.message = "已有目标语言内封字幕";
       task.updatedAt = Date.now();
@@ -2516,23 +2707,34 @@ async function processBatchTask(task, runId) {
     task.message = "正在搜索全部来源";
     task.phase = "search";
     renderBatchMatchState();
-    const controller = new AbortController();
+    controller = new AbortController();
     state.batchControllers.set(task.id, controller);
+    const language = nodes.language.value;
+    const conversion = automaticConversionFor(language);
+    task.language = language;
+    task.conversion = conversion;
+    task.videoDurationMs = Number(inspection.videoDurationMs || video.videoDurationMs || 0);
     const request = buildSearchRequest({
       query: video.query || video.name,
       source: "all",
-      language: nodes.language.value,
+      language,
       limit: 100,
       video,
       videoInfo: inspection,
     });
     const data = await fetchSearchData(request, BATCH_SEARCH_TIMEOUT_MS, controller);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
-    const selected = await chooseBestValidSubtitleResult(data.results || [], task, controller);
+    const { candidates, incompleteCount, excludedCount, restrictedCount } = await validateBatchCandidates(data.results || [], task, controller, mode);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
-    if (!selected) {
+    const keywordCount = Number(data.excludedCount || 0) + excludedCount;
+    const excludedLabel = keywordCount ? ` · 关键词排除 ${keywordCount} 份` : "";
+    const restrictedLabel = restrictedCount ? ` · ${restrictedCount} 份未命中保存特征` : "";
+    if (!candidates.length) {
       task.status = "no-result";
-      task.message = (data.results || []).length ? "候选字幕均未通过校验" : "全部来源均无可用结果";
+      const sourceFailures = Array.isArray(data.errors) ? data.errors.length : 0;
+      const failureLabel = sourceFailures ? ` · ${sourceFailures} 个来源失败` : "";
+      task.message = (incompleteCount ? `没有合格字幕 · 排除 ${incompleteCount} 份明显残缺字幕`
+        : keywordCount || restrictedCount ? "没有符合条件的字幕" : (data.results || []).length ? "候选字幕均未通过校验" : "本轮未找到可用字幕") + excludedLabel + restrictedLabel + failureLabel;
       task.updatedAt = Date.now();
       renderBatchMatchState();
       renderVideoFiles();
@@ -2540,20 +2742,31 @@ async function processBatchTask(task, runId) {
       return;
     }
 
+    if (mode === "review") {
+      task.status = "ready";
+      task.request = request;
+      task.candidates = candidates;
+      task.incompleteCount = incompleteCount;
+      task.message = `${candidates.length} 份可选${incompleteCount ? ` · 排除 ${incompleteCount} 份残缺字幕` : ""}${excludedLabel}${restrictedLabel}`;
+      task.updatedAt = Date.now();
+      renderBatchMatchState();
+      renderVideoFiles();
+      return;
+    }
+
     // 14.3 保存最高质量结果
+    const selected = candidates[0].result;
     task.message = `正在保存 ${selected.sourceLabel || selected.source}`;
     task.phase = "save";
     task.result = selected;
     renderBatchMatchState();
-    const saved = await saveBatchSubtitle(video, selected);
+    const saved = await saveBatchSubtitle(video, selected, language, 1, conversion);
     if (!(saved && saved.saved)) throw new Error(saved?.error || "保存字幕失败");
     task.status = "saved";
     task.savedPath = saved.filePath || saved.fileName || "";
     task.message = "已匹配";
     task.updatedAt = Date.now();
-    video.hasExternalSubtitle = true;
-    video.hasSubtitle = true;
-    video.existingSubtitleCount = Number(video.existingSubtitleCount || 0) + 1;
+    recordBatchSubtitle(video, saved);
     renderBatchMatchState();
     renderVideoFiles();
     logger.info("处理单个视频任务完成: saved");
@@ -2581,63 +2794,100 @@ async function processBatchTask(task, runId) {
     logger.error("处理单个视频任务失败", video.name, error);
   } finally {
     task.phase = "";
-    state.batchControllers.delete(task.id);
+    if (state.batchControllers.get(task.id) === controller) state.batchControllers.delete(task.id);
   }
 }
 
-async function chooseBestValidSubtitleResult(results, task, controller) {
-  /*
-   * ================================================================================
-   * 步骤14.5：选择通过校验的字幕
-   * ================================================================================
-   * 目标：
-   * 1) 按统一质量分依次检查候选字幕真实内容
-   * 2) 第一条是网页、空文件或错语言时自动尝试下一条
-   */
-  logger.info("开始选择通过校验的字幕...");
+async function checkSubtitleCandidates(results, options, controller, onProgress) {
+  const checks = results.map((result) => ({ result, data: null }));
+  let next = 0;
+  let completed = 0;
+  const worker = async () => {
+    while (!controller.signal.aborted && next < checks.length) {
+      const check = checks[next++];
+      const params = new URLSearchParams({ id: check.result.id, lang: options.language });
+      if (options.conversion) params.set("convert", options.conversion);
+      if (options.videoDurationMs > 0) params.set("videoDurationMs", String(options.videoDurationMs));
+      try {
+        const response = await fetchWithController(apiUrl(`/api/validate?${params.toString()}`), {
+          timeoutMs: PREVIEW_TIMEOUT_MS,
+          controller,
+        });
+        const data = await response.json();
+        if ((response.ok && data.valid) || data.excluded) check.data = data;
+        else logger.warn("字幕候选未通过校验", check.result.title, data.detail || data.error);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        logger.warn("校验字幕候选失败", check.result.title, error);
+      }
+      completed += 1;
+      if (!controller.signal.aborted) onProgress(completed, checks.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(checks.length, 4) }, worker));
+  return checks;
+}
 
-  // 14.5.1 按现有质量规则排序并限制远程校验数量
-  const candidates = (Array.isArray(results) ? results : [])
-    .map((result, index) => ({ result, index }))
-    .sort((left, right) => {
-      const qualityOrder = Number(right.result.qualityScore || 0) - Number(left.result.qualityScore || 0);
-      return qualityOrder || left.index - right.index;
-    })
-    .slice(0, 8)
-    .map((entry) => entry.result);
+function candidateIdentityRank(result) {
+  return Number(Boolean(result.qualityReasons?.includes("指纹匹配"))) * 2 + Number(Boolean(result.catalogMatch));
+}
 
-  // 14.5.2 逐个请求服务端结构校验
-  for (const [index, candidate] of candidates.entries()) {
-    task.message = `正在校验 ${index + 1}/${candidates.length} · ${candidate.sourceLabel || candidate.source}`;
+function canRecommendSubtitle(data) {
+  return Boolean(data?.valid && !data.batchIssue && !data.saveRestriction && data.validation?.language?.match !== false);
+}
+
+function compareCheckedSubtitles(left, right) {
+  const leftData = canRecommendSubtitle(left.data) ? left.data : null;
+  const rightData = canRecommendSubtitle(right.data) ? right.data : null;
+  return Number(Boolean(rightData)) - Number(Boolean(leftData))
+    || candidateIdentityRank(right.result) - candidateIdentityRank(left.result)
+    || (rightData?.recommendationRank || 0) - (leftData?.recommendationRank || 0)
+    || (rightData?.openingDescriptionCount || 0) - (leftData?.openingDescriptionCount || 0)
+    || (rightData?.descriptionCount || 0) - (leftData?.descriptionCount || 0);
+}
+
+function subtitleRecommendationLabel(data) {
+  return [
+    data.recommendationRank >= 2 ? "色花/98堂标记" : "",
+    data.descriptionCount ? `括号说明 ${data.descriptionCount} 处` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+async function validateBatchCandidates(results, task, controller, mode) {
+  const checks = await checkSubtitleCandidates(results, task, controller, (done, total) => {
+    task.message = `正在校验正文 ${done}/${total}`;
     task.updatedAt = Date.now();
     renderBatchMatchState();
-    renderVideoFiles();
-    try {
-      const params = new URLSearchParams({ id: candidate.id, lang: nodes.language.value });
-      const response = await fetchWithController(apiUrl(`/api/validate?${params.toString()}`), {
-        headers: {},
-        timeoutMs: PREVIEW_TIMEOUT_MS,
-        controller,
-      });
-      const data = await response.json();
-      if (response.ok && data.valid && data.validation?.language?.match !== false) {
-        logger.info("选择通过校验的字幕完成", candidate.source);
-        return candidate;
-      }
-      logger.warn("字幕候选未通过校验", candidate.title, data.validation?.language?.message || data.detail || data.error || "invalid");
-    } catch (error) {
-      if (controller.signal.aborted) throw error;
-      logger.warn("校验字幕候选失败", candidate.title, error);
-    }
+    if (mode === "single") renderVideoFiles();
+  });
+  const incompleteCount = checks.filter(({ data }) => data?.batchIssue).length;
+  const excludedCount = checks.filter(({ data }) => data?.excluded).length;
+  const restrictedCount = checks.filter(({ data }) => data?.saveRestriction).length;
+  const content = new Set();
+  const candidates = [];
+  for (const { result, data } of checks.sort((left, right) => compareCheckedSubtitles(left, right)
+    || Number(right.result.qualityScore || 0) - Number(left.result.qualityScore || 0))) {
+    if (!data?.valid || data.batchIssue || data.saveRestriction || (mode === "single" && !canRecommendSubtitle(data))) continue;
+    if (data.contentHash && content.has(data.contentHash)) continue;
+    if (data.contentHash) content.add(data.contentHash);
+    candidates.push({
+      result: { ...result, fileName: data.fileName || result.fileName },
+      selected: false,
+      recommendationLabel: subtitleRecommendationLabel(data),
+      contentHash: data.contentHash,
+      encoding: data.encoding,
+      size: data.size,
+      cueCount: data.validation?.cueCount,
+      languageWarning: data.validation?.language?.match === false
+        ? data.validation.language.message || "语言与筛选项可能不符" : "",
+    });
   }
-
-  logger.info("选择通过校验的字幕完成: empty");
-  return null;
+  return { candidates, incompleteCount, excludedCount, restrictedCount };
 }
 
-async function saveBatchSubtitle(video, result) {
+async function saveBatchSubtitle(video, result, language, version, conversion) {
   if (video.remote115) {
-    return drive115UI.saveSubtitle(video, { id: result.id, language: nodes.language.value });
+    return drive115UI.saveSubtitle(video, { id: result.id, language, conversion, version });
   }
   /*
    * ================================================================================
@@ -2652,21 +2902,30 @@ async function saveBatchSubtitle(video, result) {
   // 15.1 按当前媒体库预设生成字幕文件名
   const preferredBaseName = buildSubtitleBaseName(video.name, {
     preset: state.namingPreset,
-    language: nodes.language.value,
+    language: conversion || language,
     source: result.source,
-    languageProfile: result.languageProfile || {},
+    languageProfile: conversion ? analyzeSubtitleLanguage(conversion) : result.languageProfile || {},
   });
-  const params = new URLSearchParams({ id: result.id, lang: nodes.language.value });
+  const params = new URLSearchParams({ id: result.id, lang: language });
+  if (conversion) params.set("convert", conversion);
   const saved = await window.subtitleFinder.saveSubtitle({
     downloadUrl: absoluteApiUrl(`/api/download?${params.toString()}`),
     fileName: result.fileName || "subtitle.srt",
-    preferredBaseName,
+    preferredBaseName: version > 1 ? `${preferredBaseName}.v${version}` : preferredBaseName,
     targetVideoPath: video.path,
     targetDirectory: video.targetDirectory || "",
   });
 
   logger.info("保存批量匹配字幕完成", saved?.saved ? "saved" : "failed");
   return saved;
+}
+
+function recordBatchSubtitle(video, saved) {
+  const fileName = saved.fileName || String(saved.filePath || "").split(/[\\/]/).pop();
+  if (fileName && !video.existingSubtitles.includes(fileName)) video.existingSubtitles.push(fileName);
+  video.hasExternalSubtitle = true;
+  video.hasSubtitle = true;
+  video.existingSubtitleCount = video.existingSubtitles.length;
 }
 
 function pauseBatchMatch() {
@@ -2702,6 +2961,175 @@ function pauseBatchMatch() {
   renderVideoFiles();
 
   logger.info("暂停批量匹配完成");
+}
+
+function openBatchReview() {
+  if (nodes.openBatchReview.hidden || nodes.openBatchReview.disabled) return;
+  nodes.batchReviewModal.hidden = false;
+  document.body.classList.add("modal-open");
+  renderBatchReview();
+  nodes.closeBatchReview.focus();
+}
+
+function closeBatchReview() {
+  if (state.batchSaving || nodes.batchReviewModal.hidden) return;
+  nodes.batchReviewModal.hidden = true;
+  nodes.batchReviewList.textContent = "";
+  if (!document.querySelector(".modal-backdrop:not([hidden])")) document.body.classList.remove("modal-open");
+  (nodes.openBatchReview.hidden ? nodes.startBatchButton : nodes.openBatchReview).focus();
+}
+
+function renderBatchReview() {
+  const videos = new Map(state.videoFiles.map((video) => [video.path, video]));
+  const groups = state.batchTasks.filter((task) => task.candidates?.length && videos.has(task.videoPath));
+  nodes.batchReviewList.textContent = "";
+  for (const [index, task] of groups.entries()) {
+    const group = document.createElement("details");
+    const summary = document.createElement("summary");
+    const rows = document.createElement("div");
+    const excluded = task.incompleteCount ? ` · 排除 ${task.incompleteCount} 份残缺字幕` : "";
+    const video = videos.get(task.videoPath);
+    const duration = formatMediaDuration(video.durationMs || video.videoDurationMs);
+    summary.textContent = [video.name, duration, `${task.candidates.length} 份${excluded}`].filter(Boolean).join(" · ");
+    group.append(summary, rows);
+    group.addEventListener("toggle", () => {
+      if (group.open && !rows.hasChildNodes()) renderBatchReviewRows(rows, task);
+    });
+    if (index === 0) group.open = true;
+    nodes.batchReviewList.append(group);
+  }
+  nodes.saveBatchReview.textContent = state.videoFiles[0]?.remote115 ? "存到 115" : "下载所选";
+  updateBatchReviewSelection();
+}
+
+function renderBatchReviewRows(container, task) {
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "batch-review-secondary batch-review-select";
+  select.textContent = "切换本片全选";
+  select.disabled = state.batchSaving;
+  select.addEventListener("click", () => {
+    const unsaved = task.candidates.filter((candidate) => !candidate.saved);
+    const checked = unsaved.some((candidate) => !candidate.selected);
+    for (const candidate of unsaved) candidate.selected = checked;
+    container.querySelectorAll('input:not(:disabled)').forEach((input) => { input.checked = checked; });
+    updateBatchReviewSelection();
+  });
+  container.append(select);
+  for (const candidate of task.candidates) {
+    const { result, encoding, size, cueCount, languageWarning, recommendationLabel } = candidate;
+    const row = document.createElement("div");
+    row.className = "batch-review-row";
+    const meta = [result.sourceLabel || result.source, size ? formatBytes(size) : "", cueCount ? `${cueCount} 条` : "", encoding,
+      recommendationLabel, languageWarning, candidate.saved ? "已保存" : candidate.error].filter(Boolean).join(" · ");
+    row.innerHTML = `<label><input type="checkbox"><span>${escapeHtml(result.title || result.fileName)}<small>${escapeHtml(meta)}</small></span></label>
+      <div class="batch-review-actions"><button class="batch-review-secondary" type="button">预览</button>${task.conversion ? '<button class="batch-review-secondary" type="button">原文</button>' : ""}</div><pre hidden></pre>`;
+    const input = row.querySelector("input");
+    input.checked = candidate.selected;
+    input.disabled = state.batchSaving || Boolean(candidate.saved);
+    input.addEventListener("change", () => {
+      candidate.selected = input.checked;
+      updateBatchReviewSelection();
+    });
+    row.querySelectorAll("button").forEach((button, index) => {
+      button.disabled = state.batchSaving;
+      button.addEventListener("click", () => {
+        void previewBatchCandidate(task, candidate, row.querySelector("pre"), index === 0 ? task.conversion : "");
+      });
+    });
+    container.append(row);
+  }
+}
+
+function updateBatchReviewSelection(message = "") {
+  const count = state.batchTasks.reduce((total, task) => total + (task.candidates || [])
+    .filter((candidate) => candidate.selected && !candidate.saved).length, 0);
+  nodes.batchReviewProgress.textContent = message ? `${message} · 已选 ${count} 份` : `已选 ${count} 份`;
+  nodes.closeBatchReview.disabled = state.batchSaving;
+  nodes.saveBatchReview.disabled = state.batchSaving || count === 0;
+}
+
+async function previewBatchCandidate(task, candidate, preview, conversion) {
+  if (!preview.hidden && preview.dataset.conversion === conversion) {
+    preview.hidden = true;
+    return;
+  }
+  preview.hidden = false;
+  preview.dataset.conversion = conversion;
+  const requestId = String(Number(preview.dataset.requestId || 0) + 1);
+  preview.dataset.requestId = requestId;
+  preview.textContent = "正在读取字幕…";
+  const params = new URLSearchParams({ id: candidate.result.id, lang: task.language });
+  if (conversion) params.set("convert", conversion);
+  const url = apiUrl(`/api/preview?${params}`);
+  try {
+    let response = await fetchWithUiTimeout(url, PREVIEW_TIMEOUT_MS);
+    if (response.status === 404) {
+      await fetchSearchData(task.request, BATCH_SEARCH_TIMEOUT_MS);
+      response = await fetchWithUiTimeout(url, PREVIEW_TIMEOUT_MS);
+    }
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || data.error || "预览失败");
+    if (preview.dataset.requestId === requestId) preview.textContent = data.text;
+  } catch (error) {
+    if (preview.dataset.requestId === requestId) preview.textContent = String(error.message || error);
+  }
+}
+
+async function saveBatchReview() {
+  if (state.batchSaving || nodes.saveBatchReview.disabled) return;
+  const videos = new Map(state.videoFiles.map((video) => [video.path, video]));
+  state.batchSaving = true;
+  nodes.batchReviewList.querySelectorAll("button, input").forEach((element) => { element.disabled = true; });
+  updateBatchReviewSelection("正在保存");
+  let savedCount = 0;
+  let failedCount = 0;
+  try {
+    for (const task of state.batchTasks) {
+      const selected = (task.candidates || []).filter((candidate) => candidate.selected && !candidate.saved);
+      const video = videos.get(task.videoPath);
+      if (!video || !selected.length) continue;
+      try {
+        // 长队列会淘汰早期结果 ID。按原搜索重新登记候选，再使用同一份已勾选的字幕。
+        const search = await fetchSearchData(task.request, BATCH_SEARCH_TIMEOUT_MS);
+        const currentIds = new Set((search.results || []).map((result) => result.id));
+        const existingVersions = (video.existingSubtitles || []).map((name) => Number(String(name).match(/\.v(\d+)\.[^.]+$/i)?.[1] || 0));
+        let nextVersion = Math.max(task.nextVersion || 1, video.hasExternalSubtitle ? 2 : 1, ...existingVersions.map((version) => version + 1));
+        for (const candidate of selected) {
+          try {
+            if (!currentIds.has(candidate.result.id)) throw new Error("来源已不再返回这份字幕，请重新匹配");
+            if (!candidate.version) candidate.version = nextVersion++;
+            const saved = await saveBatchSubtitle(video, candidate.result, task.language, candidate.version, task.conversion);
+            if (!saved?.saved) throw new Error(saved?.error || "保存字幕失败");
+            candidate.saved = true;
+            candidate.selected = false;
+            candidate.error = "";
+            recordBatchSubtitle(video, saved);
+            task.savedPath = saved.filePath || saved.fileName || "";
+            savedCount += 1;
+          } catch (error) {
+            candidate.error = String(error.message || error);
+            failedCount += 1;
+          }
+          nodes.batchReviewProgress.textContent = `正在保存 · 已保存 ${savedCount} 份 · 失败 ${failedCount} 份`;
+        }
+        task.nextVersion = nextVersion;
+        const remaining = task.candidates.filter((candidate) => !candidate.saved).length;
+        task.status = remaining ? "ready" : "saved";
+        task.message = remaining ? `${remaining} 份仍可选` : `已保存 ${task.candidates.length} 份`;
+      } catch (error) {
+        for (const candidate of selected) candidate.error = String(error.message || error);
+        failedCount += selected.length;
+      }
+    }
+  } finally {
+    state.batchSaving = false;
+    renderVideoFiles();
+    renderBatchMatchState();
+    renderBatchReview();
+    updateBatchReviewSelection(`已保存 ${savedCount} 份 · 失败 ${failedCount} 份`);
+    nodes.closeBatchReview.focus();
+  }
 }
 
 async function retryBatchMatch() {
@@ -2747,18 +3175,21 @@ function renderBatchMatchState() {
   logger.info("开始渲染批量匹配状态...");
 
   // 18.1 没有视频时隐藏面板
-  const missingCount = state.videoFiles.filter((video) => !video.hasSubtitle).length;
+  const reviewMode = nodes.batchMode.value === "review";
+  const includeExisting = reviewMode && nodes.batchIncludeExisting.checked;
+  const eligibleCount = includeExisting ? state.videoFiles.length : state.videoFiles.filter((video) => !video.hasSubtitle).length;
   nodes.batchPanel.hidden = state.videoFiles.length === 0 || state.singleVideoMode;
   const cloud = Boolean(state.videoFiles[0]?.remote115);
   nodes.batchNamingPreset.hidden = cloud;
   nodes.cloudBatchNaming.hidden = !cloud;
+  nodes.batchIncludeLabel.hidden = !reviewMode;
   if (cloud) nodes.cloudBatchNaming.textContent = state.matchVideoName ? "115 · 按视频名保存" : "115 · 按字幕名保存";
   const total = state.batchTasks.length;
   const counts = state.batchTasks.reduce((summary, task) => {
     summary[task.status] = (summary[task.status] || 0) + 1;
     return summary;
   }, {});
-  const completed = Number(counts.saved || 0) + Number(counts["no-result"] || 0) + Number(counts.failed || 0) + Number(counts.skipped || 0);
+  const completed = Number(counts.saved || 0) + Number(counts["no-result"] || 0) + Number(counts.failed || 0) + Number(counts.skipped || 0) + Number(counts.ready || 0);
 
   // 18.2 更新进度条和文字
   const progress = nodes.batchProgress.querySelector("progress");
@@ -2766,25 +3197,28 @@ function renderBatchMatchState() {
   progress.max = Math.max(total, 1);
   progress.value = Math.min(completed, progress.max);
   if (!total) {
-    label.textContent = missingCount ? `待匹配 ${missingCount} 个视频` : "没有缺字幕视频";
+    label.textContent = eligibleCount ? `待匹配 ${eligibleCount} 个视频` : "没有缺字幕视频";
   } else {
-    label.textContent = `完成 ${completed}/${total} · 保存 ${counts.saved || 0} · 无结果 ${counts["no-result"] || 0} · 失败 ${counts.failed || 0} · 跳过 ${counts.skipped || 0}`;
+    label.textContent = `完成 ${completed}/${total} · 待选择 ${counts.ready || 0} · 保存 ${counts.saved || 0} · 无结果 ${counts["no-result"] || 0} · 失败 ${counts.failed || 0} · 跳过 ${counts.skipped || 0}`;
   }
 
   // 18.3 同步按钮状态
   const running = state.batchStatus === "running";
+  const locked = running || state.batchSaving;
   const retryable = Number(counts.failed || 0) + Number(counts["no-result"] || 0);
-  nodes.startBatchButton.disabled = running || (!missingCount && state.batchStatus !== "paused");
+  nodes.startBatchButton.disabled = locked || (!eligibleCount && state.batchStatus !== "paused");
   nodes.startBatchButton.textContent = state.batchStatus === "paused"
-    ? "继续"
-    : state.batchStatus === "completed"
-      ? "已完成"
-      : "匹配字幕";
+    ? (reviewMode ? "继续查找候选" : "继续自动保存")
+    : (reviewMode ? "查找候选" : "自动保存首选");
   nodes.pauseBatchButton.disabled = !running;
-  nodes.retryBatchButton.disabled = running || retryable === 0;
-  nodes.namingPreset.disabled = running;
-  nodes.batchConcurrency.disabled = running;
-  nodes.language.disabled = running;
+  nodes.retryBatchButton.disabled = locked || retryable === 0;
+  nodes.namingPreset.disabled = locked;
+  nodes.batchConcurrency.disabled = locked;
+  nodes.language.disabled = locked;
+  nodes.batchMode.disabled = locked || state.batchStatus === "paused";
+  nodes.batchIncludeExisting.disabled = nodes.batchMode.disabled;
+  nodes.openBatchReview.hidden = !counts.ready;
+  nodes.openBatchReview.disabled = locked;
 
   // 18.4 任务和进度变化后安排持久化
   scheduleBatchStateSave();

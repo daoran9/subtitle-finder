@@ -2,23 +2,26 @@
 
 Windows 和 Android 上的字幕检索与管理工具。按片名、季集号或视频文件查找字幕，预览后保存到本机，也可以为 115 网盘中的视频查找并保存字幕。
 
-## 下载 v1.7.2
+## 下载 v1.7.3
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.2/SubtitleFinder.Setup.1.7.2.exe) | 安装后从开始菜单启动 |
-| [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.2/SubtitleFinder.1.7.2.exe) | 放到可写目录，双击运行 |
-| [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.2/SubtitleFinder.Android.1.7.2.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
+| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.3/SubtitleFinder.Setup.1.7.3.exe) | 安装后从开始菜单启动 |
+| [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.3/SubtitleFinder.1.7.3.exe) | 放到可写目录，双击运行 |
+| [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.3/SubtitleFinder.Android.1.7.3.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
 
-[v1.7.2 发布说明与校验值](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.2) · [最新正式版](https://github.com/daoran9/subtitle-finder/releases/latest) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
+[v1.7.3 发布说明与校验值](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.3) · [最新正式版](https://github.com/daoran9/subtitle-finder/releases/latest) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
 
 Windows 程序未签名，首次运行时系统可能显示未知发布者。Android 若拦截 APK 安装，可在系统设置中允许当前来源安装应用。
 
-## v1.7.2 更新
+## v1.7.3 更新
 
+- **115 保存与扫码**。按文件 ID 核对选中的视频和上传结果，减少目录里其他文件变动对保存的影响。扫码等待期间收到空状态时，继续等待同一张码。
+- **按视频批量选择字幕**。可为多部视频分别勾选多份字幕，再下载到本地或保存到 115。需要一键保存时，可切换到「自动保存首选」。
+- **字幕筛选与推荐**。普通搜索和批量匹配按字幕正文推荐。设置支持可编辑的保存特征、排除关键词及自动简繁转换。
+- **视频时长**。本地和 115 文件列表会在文件名旁显示已知时长。
 - **115 更新时间排序**。浏览或搜索文件和文件夹时，可按更新时间从新到旧或从旧到新排序。
-- **迅雷匹配修正**。从 115 选择带编号的视频时，按标准编号检索。编号搜索会过滤无法核对编号的迅雷关键词结果。
-- **简繁转换修正**。使用 OpenCC 标准配置，按字形转换并保留原文中的地区词汇。
+- **编号和简繁转换**。改进部分带前导零的文件名识别。OpenCC 按字形转换并保留原文里的地区词汇。
 
 ## 主要功能
 
@@ -47,9 +50,17 @@ Windows 程序未签名，首次运行时系统可能显示未知发布者。And
 
 ### 批量匹配视频文件夹
 
-在 115 进入目标目录，点「选择当前文件夹」扫描，再点「匹配字幕」。程序会跳过已有同目录字幕的视频，把找到的字幕存到各视频所在目录。重启后重新扫码并扫描，可接着匹配仍缺字幕的视频。
+在 115 进入目标目录，点「选择当前文件夹」扫描。默认处理缺少同目录字幕的视频。保存时会把字幕放到各视频所在目录。重启后重新扫码并扫描，可接着匹配仍缺字幕的视频。
 
 本地文件夹支持识别同目录字幕和内封字幕，并可读取同名 NFO、`movie.nfo` 和 `tvshow.nfo` 补全搜索信息。本地和 115 都会递归扫描最多 500 个视频，支持排除花絮、样片等文件。
+
+选好文件夹后，默认使用「手动挑选字幕」。点「查找候选」，按视频分组预览并勾选所需字幕，再一次保存。相同内容只列一份，明显残缺的字幕会被排除。额外版本会追加 `.v2`、`.v3` 等后缀。需要一键补字幕时，可切换到「自动保存首选」。
+
+编号与语言匹配的候选中，含色花、色花堂、sehua、sehuatang、98T、98堂等来源标记的字幕优先，英文标记忽略大小写。括号说明的数量也参与排序，重复说明只计一次。普通搜索、手动挑选和「自动保存首选」使用同一套正文推荐规则。开启保存特征筛选时，搜索会先核对正文再显示命中项。
+
+「设置 → 字幕排除关键词」支持每行填写一个词或短语。搜索时匹配字幕标题和文件名，预览、校验和保存时也检查字幕正文，命中任意一项即排除。
+
+「设置 → 仅保存匹配特征的字幕」默认关闭。保存特征预填了色花、98 堂等标记和 `[括号说明]`，每行一项，可自行删除、替换或添加。开启后，原字幕正文命中任意一项即可保存。手动搜索默认列出命中的字幕，点「显示其他」可展开其余结果预览。本地下载、存到 115 和批量匹配均会核对保存特征。
 
 批量匹配支持 1 至 3 个并发任务，可以暂停、继续或重试。本地批量任务可在重启后手动恢复，并可选择通用、Emby、Jellyfin、Plex 或视频同名命名。Windows 保存到视频所在目录，Android 保存到选取视频文件夹时授权的目录。
 
@@ -60,6 +71,7 @@ Windows 程序未签名，首次运行时系统可能显示未知发布者。And
 - ASSRT 可直接使用公开网页。有 Token 时优先调用官方 API，结果不可用时回退到公开网页。Token 仅在当前运行期间保留。
 - 支持 SRT、ASS、SSA、VTT 和 MicroDVD SUB。ZIP、RAR 和 7z 会按季集、语言和版本挑选包内字幕。应用检查时间轴和内容，并统一以 UTF-8 保存。
 - 中文字幕可用 OpenCC 生成简体或繁体副本，按字形转换并保留原文的地区用词。自定义词库每行填写一对 `简体=繁体`，转换时双向应用。
+- 「设置 → 中文优先」选择默认中文检索语言。开启「自动简繁转换」后，中文预览和保存会使用优先的字形，预览时可切换回原文。
 
 ## 平台功能
 

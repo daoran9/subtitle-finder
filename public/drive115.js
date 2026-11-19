@@ -1,4 +1,4 @@
-import { analyzeMediaFile } from "./media-library.js";
+import { analyzeMediaFile, formatMediaDuration } from "./media-library.js";
 
 const SORT_ORDERS = {
   name: { asc: "name-asc", desc: "name-desc" },
@@ -62,7 +62,7 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
     target.hidden = !video;
     if (video) {
       const ext = subtitle?.fileName?.match(/\.(srt|ass|ssa|vtt|sub)$/i)?.[0]?.toLowerCase();
-      targetDirectory.textContent = `115 · ${targetPath}`;
+      targetDirectory.textContent = ["115", targetPath, formatMediaDuration(video.durationMs)].filter(Boolean).join(" · ");
       targetName.textContent = shouldMatchVideoName()
         ? video.name.replace(/\.[^.]+$/, "") + (ext || "（字幕扩展名）")
         : subtitle?.fileName || "选择字幕后显示文件名";
@@ -80,6 +80,7 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
       video: { id: item.id, parentId: item.parentId, name: item.name },
       accountId: item.accountId,
       resultId: subtitle.id, language: subtitle.language, conversion: subtitle.conversion,
+      version: subtitle.version,
     });
   }
   function cancelPolling() { generation += 1; clearTimeout(timer); qr.hidden = true; qr.removeAttribute("src"); }
@@ -125,12 +126,14 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
     button.disabled = true;
     try {
       let directory = parent;
+      let durationMs = entry.durationMs;
       if (parent !== path && parent !== rootPath) {
         const page = await api(`files?parentId=${entry.parentId}`);
         if (run !== pageRun) return;
         directory = page.path || parent;
+        durationMs ||= page.entries.find((item) => item.id === entry.id)?.durationMs;
       }
-      selectTarget({ ...entry, ...analyzeMediaFile(entry.name), remote115: true, accountId: account.id }, directory.map((item) => item.name).join(" / "));
+      selectTarget({ ...entry, ...analyzeMediaFile(entry.name), durationMs, remote115: true, accountId: account.id }, directory.map((item) => item.name).join(" / "));
       close(); onSelect(video);
     } catch (error) {
       if (run === pageRun) message.textContent = error.message;
@@ -175,7 +178,7 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
       for (const entry of data.entries) {
         const clickable = entry.directory || entry.video || Boolean(keyword);
         const row = document.createElement(clickable ? "button" : "span");
-        row.textContent = `${entry.directory ? "文件夹" : entry.video ? "视频" : "文件"} · ${entry.name}`;
+        row.textContent = [entry.directory ? "文件夹" : entry.video ? "视频" : "文件", entry.name, formatMediaDuration(entry.durationMs)].filter(Boolean).join(" · ");
         row.className = clickable ? "drive115-file" : "drive115-file-label";
         if (clickable) {
           row.type = "button";

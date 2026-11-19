@@ -108,11 +108,21 @@ test("通用设置跨重启恢复并限制字段", async () => {
   try {
     const store = createRuntimeStore(directory);
     await store.initialize();
-    assert.equal((await store.readPreferences()).matchVideoName, true);
+    const defaults = await store.readPreferences();
+    assert.equal(defaults.matchVideoName, true);
+    assert.equal(defaults.autoConvertChinese, false);
+    assert.equal(defaults.preferredChinese, "zh-CN");
+    assert.equal(defaults.subtitleExclusionKeywords, "");
+    assert.equal(defaults.subtitleSaveFilter.enabled, false);
+    assert.deepEqual(defaults.subtitleSaveFilter.keywords.split("\n"), ["色花", "色花堂", "sehua", "sehuatang", "98T", "98堂", "[括号说明]"]);
     await store.writePreferences({
       scanExclusionRules: ["**/Extras/**", "*.sample.*"],
+      subtitleExclusionKeywords: "机器翻译\nBad release",
+      subtitleSaveFilter: { enabled: true, keywords: "  版本标记  " },
       customDictionary: "软件=軟件\n出租车=計程車",
       matchVideoName: false,
+      autoConvertChinese: true,
+      preferredChinese: "zh-TW",
       ignored: "不会保存",
     });
 
@@ -121,11 +131,18 @@ test("通用设置跨重启恢复并限制字段", async () => {
     await restored.initialize();
     assert.deepEqual(await restored.readPreferences(), {
       scanExclusionRules: ["**/Extras/**", "*.sample.*"],
+      subtitleExclusionKeywords: "机器翻译\nBad release",
+      subtitleSaveFilter: { enabled: true, keywords: "版本标记" },
       customDictionary: "软件=軟件\n出租车=計程車",
       matchVideoName: false,
+      autoConvertChinese: true,
+      preferredChinese: "zh-TW",
     });
     await assert.rejects(() => restored.writePreferences({ customDictionary: "错误格式" }), /第 1 行/);
+    await assert.rejects(() => restored.writePreferences({ subtitleSaveFilter: { enabled: true, keywords: "\n " } }), /至少填写/);
     await assert.rejects(() => restored.writePreferences({ token: "private" }), /无效/);
+    await restored.writePreferences({ subtitleSaveFilter: { enabled: false, keywords: "" } });
+    assert.equal((await restored.readPreferences()).subtitleSaveFilter.keywords, "");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

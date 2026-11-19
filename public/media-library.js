@@ -3,6 +3,15 @@ import { extractAvIdentity, sameAvIdentity } from "./av-identity.js";
 export const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"]);
 export const SUBTITLE_EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt", ".sub"]);
 
+export function formatMediaDuration(milliseconds) {
+  const totalSeconds = Math.round(Number(milliseconds) / 1000);
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "";
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return (hours ? [hours, minutes, seconds] : [minutes, seconds]).map((value) => String(value).padStart(2, "0")).join(":");
+}
+
 const GENERIC_MEDIA_FOLDERS = new Set([
   "movie",
   "movies",

@@ -130,8 +130,20 @@
                 </label>
               </div>
               <p id="cloudBatchNaming" class="muted" hidden></p>
+              <div class="batch-settings">
+                <label>
+                  匹配方式
+                  <select id="batchModeSelect">
+                    <option value="review">手动挑选字幕</option>
+                    <option value="single">自动保存首选</option>
+                  </select>
+                </label>
+              </div>
+              <label id="batchIncludeLabel" class="batch-include" hidden>
+                <input id="batchIncludeExisting" type="checkbox" /> 包含已有字幕的视频
+              </label>
               <div class="batch-actions">
-                <button id="startBatchButton" type="button">匹配字幕</button>
+                <button id="startBatchButton" type="button">查找候选</button>
                 <button id="pauseBatchButton" type="button" disabled>暂停</button>
                 <button id="retryBatchButton" type="button" disabled>重试</button>
               </div>
@@ -139,6 +151,7 @@
                 <progress max="1" value="0"></progress>
                 <span>尚未开始</span>
               </div>
+              <button id="openBatchReview" type="button" hidden>查看待下载字幕</button>
             </div>
           </div>
         </aside>
@@ -148,6 +161,7 @@
             <div>
               <h2>结果</h2>
               <p id="resultSummary">等待搜索</p>
+              <button id="showOtherSearchResults" class="text-link-button" type="button" aria-expanded="false" aria-controls="resultsBody" hidden>显示其他字幕</button>
             </div>
             <div class="results-actions">
               <button id="batchDownloadButton" type="button" aria-disabled="true">批量下载</button>
@@ -221,6 +235,22 @@
         </section>
       </section>
     </main>
+
+    <div id="batchReviewModal" class="modal-backdrop" hidden>
+      <section class="about-dialog batch-review-dialog" role="dialog" aria-modal="true" aria-labelledby="batchReviewTitle">
+        <header class="about-header">
+          <div>
+            <h2 id="batchReviewTitle">按视频选择字幕</h2>
+            <p id="batchReviewProgress" aria-live="polite"></p>
+          </div>
+          <button id="closeBatchReview" class="batch-review-secondary" type="button">关闭</button>
+        </header>
+        <div id="batchReviewList" class="batch-review-list"></div>
+        <footer class="about-footer">
+          <button id="saveBatchReview" type="button">下载所选</button>
+        </footer>
+      </section>
+    </div>
 
     <div id="drive115Modal" class="modal-backdrop" hidden>
       <section class="about-dialog drive115-dialog" role="dialog" aria-modal="true" aria-labelledby="drive115Title" tabindex="-1">
@@ -325,9 +355,35 @@
             <span>按视频名保存字幕</span>
             <input id="matchVideoName" type="checkbox" role="switch" checked />
           </label>
+          <label class="toggle-row">
+            <span>自动简繁转换</span>
+            <input id="autoConvertChinese" type="checkbox" role="switch" />
+          </label>
+          <label class="settings-field" for="preferredChineseSelect">
+            <span>中文优先</span>
+            <select id="preferredChineseSelect">
+              <option value="zh-CN">简体优先</option>
+              <option value="zh-TW">繁体优先</option>
+            </select>
+          </label>
+          <label class="settings-field" for="subtitleExclusionKeywordsInput">
+            <span>字幕排除关键词</span>
+            <textarea id="subtitleExclusionKeywordsInput" rows="3" maxlength="4000" spellcheck="false" aria-describedby="subtitleExclusionHelp"></textarea>
+            <small id="subtitleExclusionHelp" class="muted">每行一个关键词，忽略大小写。搜索时检查标题和文件名，读取字幕后检查正文。</small>
+          </label>
+          <label class="toggle-row">
+            <span>仅保存匹配特征的字幕</span>
+            <input id="subtitleSaveFilterEnabled" type="checkbox" role="switch" aria-describedby="subtitleSaveFilterHelp" />
+          </label>
+          <label class="settings-field" for="subtitleSaveFilterKeywords">
+            <span>字幕保存特征</span>
+            <textarea id="subtitleSaveFilterKeywords" rows="5" maxlength="4000" spellcheck="false" aria-describedby="subtitleSaveFilterHelp"></textarea>
+            <small id="subtitleSaveFilterHelp" class="muted">每行一项，可删改或添加。开启后，正文命中任意一项才可保存到本地或 115。[括号说明] 匹配括号里的说明文字。</small>
+          </label>
           <label class="settings-field" for="scanExclusionRulesInput">
-            <span>扫描排除规则</span>
-            <textarea id="scanExclusionRulesInput" rows="4" spellcheck="false" placeholder="**/Extras/**&#10;*.sample.*"></textarea>
+            <span>文件夹扫描排除规则</span>
+            <textarea id="scanExclusionRulesInput" rows="4" spellcheck="false" aria-describedby="scanExclusionHelp" placeholder="**/Extras/**&#10;*.sample.*"></textarea>
+            <small id="scanExclusionHelp" class="muted">每行一条，按文件名或相对路径跳过视频和文件夹。</small>
           </label>
           <label class="settings-field" for="customDictionaryInput">
             <span>自定义简繁词库</span>

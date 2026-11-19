@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildConvertedSubtitleFileName,
   convertSubtitleChinese,
+  incompleteSubtitleReason,
   parseCustomConversionDictionary,
   validateSubtitleText,
 } from "../lib/subtitle-tools.mjs";
@@ -37,20 +38,58 @@ test("有效 SRT 返回时间轴和对白数量", () => {
   assert.equal(result.format, "SRT");
   assert.equal(result.cueCount, 2);
   assert.equal(result.durationSeconds, 6.5);
+  assert.equal(result.spanSeconds, 5.5);
+  assert.ok(incompleteSubtitleReason(result, 7_200_000));
+  assert.equal(incompleteSubtitleReason(result, 12_000), "");
+});
+
+test("按字幕正文识别来源标记和括号说明", () => {
+  const rank = (text, fileName = "字幕.srt") => validateSubtitleText(
+    `1\n00:00:01,000 --> 00:00:03,000\n${text}\n`,
+    { fileName, language: "zh-CN" },
+  ).recommendationRank;
+  for (const marker of ["色花", "色花堂", "有色花", "SeHuA", "sehuatang", "SEHUATANG", "98t", "98T", "www.98T.la", "98堂", "９８Ｔ"]) {
+    assert.equal(rank(marker), 2, marker);
+  }
+  assert.equal(rank("原色花堂\n（课外授课）"), 3);
+  assert.equal(rank("<i>（脚步声渐近）</i>"), 1);
+  assert.equal(rank("说明 (Door creaks softly)"), 1);
+  assert.equal(rank("（網友上傳）(簡體中文)(1080p) A98T 198堂 unsehua sehuatang123"), 0);
+  assert.equal(rank("普通字幕", "色花.98T（人工校对）.srt"), 0);
+});
+
+test("括号推荐统计不同说明和开场说明，重复文字只计一次", () => {
+  const result = validateSubtitleText(`1
+00:01:04,000 --> 00:01:06,000
+（门外传来脚步声）（室内广播响起）
+
+2
+00:02:59,000 --> 00:03:01,000
+(门外传来脚步声)
+
+3
+00:08:00,000 --> 00:08:02,000
+（回到出发地点）（简体中文）
+`, { fileName: "test.srt" });
+  assert.equal(result.recommendationRank, 1);
+  assert.equal(result.descriptionCount, 3);
+  assert.equal(result.openingDescriptionCount, 2);
 });
 
 // 1.2 接受有效 ASS
 test("有效 ASS 按 Events Format 解析", () => {
   const result = validateSubtitleText(`
 [Script Info]
-Title: Daria
+Title: Daria 98堂（人工校对）
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,SEHUA
 Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,你好，世界
 `, { fileName: "Daria.ass", language: "zh-CN" });
   assert.equal(result.valid, true);
   assert.equal(result.format, "ASS");
   assert.equal(result.cueCount, 1);
+  assert.equal(result.recommendationRank, 0);
 });
 
 // 1.2.1 接受 WebVTT 可省略小时的标准时间格式

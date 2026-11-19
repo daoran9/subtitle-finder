@@ -17,6 +17,7 @@ import {
   buildConvertedSubtitleFileName,
   convertSubtitleChinese,
   validateSubtitleText,
+  incompleteSubtitleReason,
 } from "./lib/subtitle-tools.mjs";
 import {
   buildAvSearchTerms,
@@ -70,7 +71,7 @@ const SEVEN_ZIP_WASM_PATH = path.join(__dirname, "vendor", "7zz.wasm");
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
 let runtimePort = DEFAULT_PORT;
 let runtimeStore = null;
-let runtimePreferences = { scanExclusionRules: [], customDictionary: "", matchVideoName: true };
+let runtimePreferences = { scanExclusionRules: [], subtitleExclusionKeywords: "", customDictionary: "", matchVideoName: true, autoConvertChinese: false, preferredChinese: "zh-CN" };
 let unrarWasmBinaryPromise = null;
 let sevenZipWasmBinaryPromise = null;
 const assrtFileDnsCache = new Map();
@@ -364,8 +365,8 @@ async function handleDrive115(req, res, url, drive) {
       const result = RESULT_CACHE.get(String(body.resultId || ""));
       if (!result) return sendJson(res, 404, { error: "字幕结果已过期，请重新搜索" });
       const { matchVideoName } = runtimePreferences;
-      const { payload } = await getValidatedSubtitlePayload({ ...result }, String(body.language || "zh-CN"), normalizeConversionTarget(body.conversion));
-      return sendJson(res, 200, await drive.save(body.video, payload, matchVideoName, body.accountId));
+      const { payload } = await getValidatedSubtitlePayload({ ...result }, String(body.language || "zh-CN"), normalizeConversionTarget(body.conversion), { forSave: true });
+      return sendJson(res, 200, await drive.save(body.video, payload, matchVideoName, body.accountId, body.version));
     }
     sendJson(res, 404, { error: "未找到接口" });
   } catch (error) {
@@ -507,7 +508,7 @@ async function handleSearch(req, url, res) {
     videoDurationMs,
     balanced: source === "all",
   });
-  const publicResults = internalResults.map(cacheResult);
+  const resultFields = publicSearchResults(internalResults);
 
   // 3.5 只缓存至少有一个来源完成的搜索，纯超时或纯失败结果允许用户立即重试
   const searchPayload = { query, source, language, variants: searchIntent.generalVariants, internalResults, errors, sourceStats };
@@ -526,13 +527,12 @@ async function handleSearch(req, url, res) {
     language,
     variants: searchIntent.generalVariants,
     catalogCode: catalogIdentity?.canonicalCode || "",
-    count: publicResults.length,
-    results: publicResults,
+    ...resultFields,
     errors,
     sourceStats,
     cached: false,
   });
-  logger.info(`搜索字幕完成: ${publicResults.length} 条`);
+  logger.info(`搜索字幕完成: ${resultFields.count} 条`);
 }
 
 function buildSearchCacheKey(options) {
@@ -582,14 +582,12 @@ function restoreCachedSearchPayload(value, createdAt) {
   logger.info("开始恢复搜索缓存结果...");
 
   // 3.8.1 注册结果 ID 并组装公开响应
-  const publicResults = (Array.isArray(value.internalResults) ? value.internalResults : []).map(cacheResult);
   const result = {
     query: value.query || "",
     source: value.source || "all",
     language: value.language || "zh-CN",
     variants: Array.isArray(value.variants) ? value.variants : [],
-    count: publicResults.length,
-    results: publicResults,
+    ...publicSearchResults(Array.isArray(value.internalResults) ? value.internalResults : []),
     errors: Array.isArray(value.errors) ? value.errors : [],
     sourceStats: Array.isArray(value.sourceStats) ? value.sourceStats : [],
     cached: true,
@@ -597,6 +595,48 @@ function restoreCachedSearchPayload(value, createdAt) {
   };
   logger.info("恢复搜索缓存结果完成", result.count);
   return result;
+}
+
+function publicSearchResults(internalResults) {
+  const keywords = splitSubtitleKeywords(runtimePreferences.subtitleExclusionKeywords);
+  const results = internalResults
+    .filter((result) => !findSubtitleKeyword(keywords, repairMojibakeText(result.title), result.fileName))
+    .map(cacheResult);
+  return { results, count: results.length, excludedCount: internalResults.length - results.length };
+}
+
+function splitSubtitleKeywords(value) {
+  return value.split(/\r\n?|\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function findSubtitleKeyword(keywords, ...fields) {
+  if (!keywords.length) return "";
+  const text = fields.map((value) => String(value || "").normalize("NFKC").toLowerCase());
+  return keywords.find((word) => {
+    const normalized = word.normalize("NFKC").toLowerCase();
+    return text.some((value) => value.includes(normalized));
+  }) || "";
+}
+
+function subtitleSaveRestriction(validation, dialogueText) {
+  const filter = runtimePreferences.subtitleSaveFilter;
+  if (!filter?.enabled) return "";
+  const text = dialogueText.normalize("NFKC").toLowerCase();
+  const matches = splitSubtitleKeywords(filter.keywords).some((keyword) => {
+    const term = keyword.normalize("NFKC").toLowerCase();
+    if (term === "[括号说明]") return validation.descriptionCount > 0;
+    if (term === "色花") return /色花(?!堂)/.test(text);
+    if (term === "98堂") return /(?:^|\D)98堂/.test(text);
+    if (/^[a-z0-9]+$/.test(term)) return new RegExp(`(?:^|[^a-z0-9])${term}(?![a-z0-9])`).test(text);
+    return text.includes(term);
+  });
+  return matches ? "" : "字幕正文未命中保存特征";
+}
+
+class SubtitleExcludedError extends Error {
+  constructor(keyword) {
+    super(`命中字幕排除关键词「${keyword}」`);
+  }
 }
 
 async function handleBatchState(req, res) {
@@ -1588,7 +1628,7 @@ async function handlePreview(url, res) {
   try {
     validated = await getValidatedSubtitlePayload(result, language, conversion);
   } catch (error) {
-    sendJson(res, 422, { error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { excluded: error instanceof SubtitleExcludedError, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("预览字幕完成: 校验失败", error.message);
     return;
   }
@@ -1603,6 +1643,7 @@ async function handlePreview(url, res) {
     encoding: validated.decoded.encoding,
     text: validated.decoded.text,
     validation: validated.validation,
+    saveRestriction: validated.saveRestriction,
     conversion: conversion || "original",
   });
   logger.info(`预览字幕完成: ${validated.payload.fileName}`);
@@ -1631,11 +1672,27 @@ async function handleValidate(url, res) {
 
   // 4.5.2 拉取并校验实际字幕
   try {
-    const validated = await getValidatedSubtitlePayload({ ...cachedResult }, language, "");
-    sendJson(res, 200, { valid: true, fileName: validated.payload.fileName, validation: validated.validation });
+    const conversion = normalizeConversionTarget(url.searchParams.get("convert"));
+    const { payload, validation, decoded, saveRestriction, sourceEncoding = decoded.encoding,
+      sourceValidation = validation } = await getValidatedSubtitlePayload({ ...cachedResult }, language, conversion);
+    const videoDurationMs = clamp(Number(url.searchParams.get("videoDurationMs") || cachedResult.videoDurationMs || 0), 0, 24 * 60 * 60 * 1000);
+    const content = decoded.text.replace(/\r\n?/g, "\n").replace(/[\t ]+$/gm, "").trim();
+    sendJson(res, 200, {
+      valid: true,
+      fileName: payload.fileName,
+      size: payload.buffer.length,
+      encoding: sourceEncoding,
+      contentHash: createHash("sha256").update(content).digest("hex"),
+      recommendationRank: sourceValidation.recommendationRank,
+      descriptionCount: sourceValidation.descriptionCount,
+      openingDescriptionCount: sourceValidation.openingDescriptionCount,
+      batchIssue: incompleteSubtitleReason(validation, videoDurationMs),
+      saveRestriction,
+      validation,
+    });
     logger.info("校验字幕候选完成: valid");
   } catch (error) {
-    sendJson(res, 422, { valid: false, error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { valid: false, excluded: error instanceof SubtitleExcludedError, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("校验字幕候选完成: invalid", error.message);
   }
 }
@@ -1666,7 +1723,7 @@ async function handleDownload(url, res) {
   // 5.2 校验并返回文件字节
   let validated;
   try {
-    validated = await getValidatedSubtitlePayload(result, language, conversion);
+    validated = await getValidatedSubtitlePayload(result, language, conversion, { forSave: true });
   } catch (error) {
     sendJson(res, 422, { error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("下载字幕完成: 校验失败", error.message);
@@ -1683,7 +1740,7 @@ async function handleDownload(url, res) {
   logger.info(`下载字幕完成: ${payload.fileName}`);
 }
 
-async function getValidatedSubtitlePayload(result, language, conversion) {
+async function getValidatedSubtitlePayload(result, language, conversion, { forSave = false } = {}) {
   /*
    * ================================================================================
    * 步骤5.5：读取有效字幕内容
@@ -1693,6 +1750,9 @@ async function getValidatedSubtitlePayload(result, language, conversion) {
    * 2) 转换简繁体时生成独立 UTF-8 字幕，不修改原始文件
    */
   logger.info("开始读取有效字幕内容...");
+  const keywords = splitSubtitleKeywords(runtimePreferences.subtitleExclusionKeywords);
+  const metadataMatch = findSubtitleKeyword(keywords, repairMojibakeText(result.title), result.fileName);
+  if (metadataMatch) throw new SubtitleExcludedError(metadataMatch);
 
   // 5.5.1 读取或创建原字幕缓存
   const cacheKey = `${result.id}|${language}`;
@@ -1701,23 +1761,28 @@ async function getValidatedSubtitlePayload(result, language, conversion) {
   if (!original || original.expiresAt <= Date.now()) {
     const payload = await fetchSubtitleBytes(result, language);
     const decoded = decodeSubtitle(payload.buffer, payload.contentType, language);
-    const validation = validateSubtitleText(decoded.text, {
+    const { dialogueText, ...validation } = validateSubtitleText(decoded.text, {
       fileName: payload.fileName,
       contentType: payload.contentType,
       language,
+      includeDialogue: true,
     });
     if (!validation.valid) throw new Error(validation.message || "字幕结构无效");
     const normalizedPayload = normalizeSubtitlePayload(payload, decoded);
-    original = { payload: normalizedPayload, decoded, validation, expiresAt: Date.now() + SUBTITLE_PAYLOAD_CACHE_TTL_MS };
+    original = { payload: normalizedPayload, decoded, validation, dialogueText, expiresAt: Date.now() + SUBTITLE_PAYLOAD_CACHE_TTL_MS };
     SUBTITLE_PAYLOAD_CACHE.delete(cacheKey);
     SUBTITLE_PAYLOAD_CACHE.set(cacheKey, original);
     pruneSubtitlePayloadCache();
   }
+  const contentMatch = findSubtitleKeyword(keywords, original.payload.fileName, original.dialogueText);
+  if (contentMatch) throw new SubtitleExcludedError(contentMatch);
+  const saveRestriction = subtitleSaveRestriction(original.validation, original.dialogueText);
+  if (forSave && saveRestriction) throw new Error(saveRestriction);
 
   // 5.5.2 原文请求直接返回已校验内容
   if (!conversion) {
     logger.info("读取有效字幕内容完成: original");
-    return original;
+    return { ...original, saveRestriction };
   }
 
   // 5.5.3 用 OpenCC 生成独立 UTF-8 文件并再次校验
@@ -1738,6 +1803,9 @@ async function getValidatedSubtitlePayload(result, language, conversion) {
       fileName: convertedFileName,
     },
     decoded: { text: convertedText, encoding: "utf-8" },
+    sourceEncoding: original.decoded.encoding,
+    sourceValidation: original.validation,
+    saveRestriction,
     validation: convertedValidation,
   };
   logger.info("读取有效字幕内容完成", conversion);

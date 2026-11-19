@@ -391,6 +391,13 @@ button:hover,
   font-weight: 800;
 }
 
+.video-file-duration {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .video-file-status[data-status="missing"] {
   color: var(--amber);
 }
@@ -445,6 +452,25 @@ button:hover,
 
 .batch-settings select {
   height: 34px;
+}
+
+.batch-include {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.batch-include input,
+.batch-review-row input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
 }
 
 .batch-actions {
@@ -1046,6 +1072,109 @@ tbody tr.is-active {
   touch-action: manipulation;
 }
 
+.batch-review-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+}
+
+.batch-review-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 8px;
+  font-size: 14px;
+}
+
+.batch-review-list summary {
+  padding: 8px 0;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.batch-review-list details + details {
+  border-top: 1px solid var(--line);
+}
+
+.batch-review-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px 8px;
+  padding: 6px 0 6px 12px;
+}
+
+.batch-review-row label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.4;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.batch-review-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.batch-review-row small {
+  display: block;
+  color: var(--muted);
+}
+
+.batch-review-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.batch-review-secondary {
+  min-height: 28px;
+  padding: 0 8px;
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.batch-review-secondary:hover:not(:disabled) {
+  background: var(--panel-strong);
+}
+
+.batch-review-select {
+  margin: 0 0 2px 12px;
+}
+
+.batch-review-row pre {
+  grid-column: 1 / -1;
+  overflow: auto;
+  max-height: 32vh;
+  margin: 0;
+  padding: 8px;
+  background: var(--panel-strong);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.batch-review-dialog .about-footer button:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: white;
+}
+
+@media (max-width: 480px) {
+  .batch-review-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .batch-review-actions {
+    margin-left: 24px;
+  }
+
+  .batch-review-secondary {
+    min-height: 36px;
+  }
+}
+
 .about-body a {
   color: var(--accent-dark);
   text-decoration: none;
@@ -1104,6 +1233,10 @@ tbody tr.is-active {
   font: 13px/1.5 Consolas, "Cascadia Mono", monospace;
   letter-spacing: 0;
   padding: 9px 10px;
+}
+
+.settings-field small {
+  font-weight: 400;
 }
 
 .settings-field textarea:focus {

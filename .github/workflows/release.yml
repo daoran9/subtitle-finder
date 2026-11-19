@@ -1,4 +1,4 @@
-name: release
+name: Verify release
 
 on:
   push:
@@ -6,13 +6,13 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-windows:
+  verify:
     runs-on: windows-latest
 
     steps:
@@ -26,35 +26,20 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
         run: npm ci
 
-      - name: Install Electron runtime
-        run: node node_modules/electron/install.js
-
       - name: Verify release version
-        id: package
         shell: pwsh
         run: |
           $version = node -p "require('./package.json').version"
           if ($env:GITHUB_REF_NAME -ne "v$version") {
             throw "Tag $env:GITHUB_REF_NAME does not match package version $version"
           }
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Check syntax
         run: npm run check
 
       - name: Run tests
         run: npm test
-
-      - name: Build Windows portable app
-        run: npm run build:win
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: docs/releases/v${{ steps.package.outputs.version }}.md
-          files: |
-            dist/SubtitleFinder ${{ steps.package.outputs.version }}.exe
-            dist/SubtitleFinder Setup ${{ steps.package.outputs.version }}.exe
-          fail_on_unmatched_files: true

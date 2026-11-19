@@ -51,6 +51,17 @@ test("相似番号不会通过精确比较", () => {
   console.info("[AvIdentityTest] 比较相似番号完成");
 });
 
+test("MIDA 补零编号统一为三位，其他系列保留原位数", () => {
+  assert.equal(extractAvIdentity("mida00458_4K60fps_ltx.mp4")?.canonicalCode, "MIDA-458");
+  assert.equal(extractAvIdentity("mida00459_4K60fps_restored.mp4")?.canonicalCode, "MIDA-459");
+  assert.equal(extractAvIdentity("MIDA-00007.mp4")?.canonicalCode, "MIDA-007");
+  assert.deepEqual(buildAvSearchTerms("MIDA-00458"), ["MIDA-458", "MIDA 458", "MIDA458"]);
+  assert.equal(sameAvIdentity("MIDA-458", "mida00458"), true);
+  assert.equal(sameAvIdentity("MIDA-458", "MIDA-00459"), false);
+  assert.equal(sameAvIdentity("MIDA-458", "MIDA-4580"), false);
+  assert.equal(extractAvIdentity("ABC-00458")?.canonicalCode, "ABC-00458");
+});
+
 /*
  * ================================================================================
  * 步骤3：验证普通影视保护

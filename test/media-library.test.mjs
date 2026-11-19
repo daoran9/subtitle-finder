@@ -68,6 +68,15 @@ test("恢复文件保留标准番号并以编号作为搜索词", () => {
   assert.equal(media.query, "JAC-089");
 });
 
+test("MIDA 补零文件按标准番号搜索并匹配同目录字幕", () => {
+  const name = "mida00458_4K60fps_ltx.mp4";
+  assert.equal(analyzeMediaFile(name).query, "MIDA-458");
+  assert.deepEqual(
+    findExistingSubtitles(name, ["MIDA-458.zh.srt", "MIDA-459.zh.srt", "MIDA-4580.zh.srt"]),
+    ["MIDA-458.zh.srt"]
+  );
+});
+
 /*
  * ================================================================================
  * 步骤2：验证已有字幕判断和排序

@@ -4,6 +4,8 @@ const logger = {
 
 const STANDARD_SEPARATOR = String.raw`[-_.\s]+`;
 const STANDARD_SUFFIX = String.raw`(?:[-_\s]?(?:uncensored|mp4|hhb|uc|ch|ver|[a-z]))?`;
+// MIDA 文件会给三位编号补零，例如 mida00458 对应 MIDA-458。
+const MIDA_NUMBER_PADDING = /^(MIDA-?)0{1,2}(?=\d{3}$)/;
 const GENERIC_LONG_PREFIXES = new Set([
   "CHAPTER",
   "EPISODE",
@@ -117,7 +119,8 @@ export function normalizeAvIdentity(value) {
   const result = String(value || "")
     .normalize("NFKC")
     .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+    .replace(/[^A-Z0-9]/g, "")
+    .replace(MIDA_NUMBER_PADDING, "$1");
 
   logger.info("标准化番号身份完成", result);
   return result;
@@ -152,7 +155,7 @@ export function extractAvIdentity(value, options = {}) {
   }
 
   // 2.3 统一生成标准码、紧凑比较键和检索变体。
-  const canonicalCode = candidate.format(candidate.match);
+  const canonicalCode = candidate.format(candidate.match).replace(MIDA_NUMBER_PADDING, "$1");
   const compactCode = normalizeAvIdentity(canonicalCode);
   const result = {
     canonicalCode,

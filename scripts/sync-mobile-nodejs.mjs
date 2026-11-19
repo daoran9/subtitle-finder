@@ -1,4 +1,4 @@
-import { mkdir, copyFile, rm } from "fs/promises";
+import { mkdir, copyFile, readFile, rm } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { build } from "esbuild";
@@ -10,6 +10,21 @@ const targetDir = path.join(projectRoot, "public", "nodejs");
 const targetPublicDir = path.join(targetDir, "public");
 
 await mkdir(targetDir, { recursive: true });
+
+function portableLetterNumberPattern() {
+  // Android 的内置 Node 没有 Unicode 属性表，把字母、数字类别展开为码点区间。
+  const isLetterOrNumber = /[\p{L}\p{N}]/u;
+  const escape = (codePoint) => `\\u{${codePoint.toString(16)}}`;
+  const ranges = [];
+  for (let start = 0; start <= 0x10ffff; start += 1) {
+    if (!isLetterOrNumber.test(String.fromCodePoint(start))) continue;
+    let end = start;
+    while (end < 0x10ffff && isLetterOrNumber.test(String.fromCodePoint(end + 1))) end += 1;
+    ranges.push(start === end ? escape(start) : `${escape(start)}-${escape(end)}`);
+    start = end;
+  }
+  return `/[${ranges.join("")}]+/gu`;
+}
 
 async function removeWithRetry(targetPath, options = {}) {
   const retries = options.retries ?? 8;
@@ -55,6 +70,15 @@ await build({
   define: {
     "import.meta.url": "import_meta_url",
   },
+  plugins: [{
+    name: "mobile-media-unicode",
+    setup(builder) {
+      builder.onLoad({ filter: /[\\/]media-library\.js$/ }, async ({ path: file }) => {
+        const contents = await readFile(file, "utf8");
+        return { contents: contents.replace(String.raw`/[\p{L}\p{N}]+/gu`, () => portableLetterNumberPattern()) };
+      });
+    },
+  }],
   logLevel: "warning",
 });
 
