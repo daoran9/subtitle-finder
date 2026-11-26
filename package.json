@@ -88,6 +88,7 @@
       ]
     },
     "nsis": {
+      "include": "build/preserve-install-data.nsh",
       "oneClick": false,
       "runAfterFinish": false,
       "allowToChangeInstallationDirectory": true,

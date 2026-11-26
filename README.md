@@ -6,7 +6,7 @@ Windows 和 Android 上的字幕检索与管理工具。按片名、季集号或
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.Setup.1.7.4.exe) | 安装后从开始菜单启动，升级时可沿用原安装目录 |
+| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.Setup.1.7.4.exe) | 安装后从开始菜单启动。升级前先退出旧版，沿用原安装目录 |
 | [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.1.7.4.exe) | 放到可写目录，双击运行。升级时保留同目录的 `SubtitleFinderData` |
 | [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.Android.1.7.4.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
 
@@ -21,6 +21,7 @@ Windows 程序未签名，首次运行时系统可能显示未知发布者。And
 - **字幕推荐与校验**。有视频时长时，优先推荐结束时间接近视频结尾的字幕。校验会拦截正文密集乱码或被当作字幕返回的网页，并显示失败原因。
 - **搜索来源修复**。修复 TVSubtitles 的搜索地址，减少 SubHD 和 TVSubtitles 番号搜索中的无关结果。
 - **版本显示和更新提醒**。顶部、「关于」和更新检查使用同一个实际版本号，避免提示更新到当前版本。
+- **Windows 安装升级**。沿用原安装目录时，安装器会保留程序旁的 `SubtitleFinderData`。
 
 ## 主要功能
 
