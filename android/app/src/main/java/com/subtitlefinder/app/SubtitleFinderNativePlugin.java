@@ -152,8 +152,10 @@ public class SubtitleFinderNativePlugin extends Plugin {
             @Override
             public void run() {
                 DocumentFile directory = DocumentFile.fromTreeUri(getContext(), treeUri);
-                List<ScanExclusionRule> exclusionRules = compileScanExclusionRules(call.getArray("excludeRules"));
-                JSArray files = scanVideoFiles(directory, exclusionRules);
+                JSArray legacyRules = call.getArray("excludeRules");
+                List<ScanExclusionRule> folderRules = compileScanExclusionRules(call.getArray("scanFolderExclusionRules", legacyRules));
+                List<ScanExclusionRule> videoRules = compileScanExclusionRules(call.getArray("scanVideoExclusionRules", legacyRules));
+                JSArray files = scanVideoFiles(directory, folderRules, videoRules);
                 JSObject response = new JSObject();
                 response.put("selected", true);
                 response.put("directory", treeUri.toString());
@@ -330,7 +332,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
      * 2) 收集常见视频扩展名并生成字幕搜索词
      * 3) 返回父目录和同目录字幕名，交给共享前端统一解析媒体身份
      */
-    private JSArray scanVideoFiles(DocumentFile directory, List<ScanExclusionRule> exclusionRules) {
+    private JSArray scanVideoFiles(DocumentFile directory, List<ScanExclusionRule> folderRules, List<ScanExclusionRule> videoRules) {
         logger.info("开始扫描视频文件...");
 
         // 4.1 校验目录
@@ -367,7 +369,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
                 if (child == null) continue;
                 if (child.isDirectory()) {
                     String childRelativePath = joinRelativePath(current.relativePath, child.getName());
-                    if (shouldExcludeScanPath(childRelativePath, exclusionRules)) continue;
+                    if (shouldExcludeScanPath(childRelativePath, folderRules)) continue;
                     List<String> childParentNames = new ArrayList<>();
                     if (child.getName() != null) childParentNames.add(child.getName());
                     childParentNames.addAll(current.parentNames);
@@ -380,7 +382,7 @@ public class SubtitleFinderNativePlugin extends Plugin {
                 String name = child.getName();
                 if (!isVideoFile(name)) continue;
                 String relativePath = joinRelativePath(current.relativePath, name);
-                if (shouldExcludeScanPath(relativePath, exclusionRules)) continue;
+                if (shouldExcludeScanPath(relativePath, videoRules)) continue;
                 String nfoName = stripExtension(name).toLowerCase(Locale.ROOT) + ".nfo";
                 JSObject nfoMetadata = mergeNfoMetadata(directoryMetadata, nfoFiles.get(nfoName));
                 JSObject item = new JSObject();

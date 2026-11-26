@@ -56,9 +56,7 @@
         logger.info("选择移动端视频目录完成: native missing");
         return { selected: false, error: "当前 Android 包缺少视频目录扫描能力" };
       }
-      const result = await nativePlugin.selectVideoDir({
-        excludeRules: Array.isArray(payload.excludeRules) ? payload.excludeRules : [],
-      });
+      const result = await nativePlugin.selectVideoDir(payload);
       logger.info("选择移动端视频目录完成", result && Array.isArray(result.files) ? result.files.length : 0);
       return result;
     },

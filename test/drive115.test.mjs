@@ -398,6 +398,23 @@ test("115 HTTP 接口限制外部来源、写入方法及输入，退出清空�
     const scan = await (await fetch(`${url}/api/drive115/scan?parentId=7&folderName=Series`)).json();
     assert.equal(scan.files[0].parentId, "7");
     assert.equal(scan.accountId, "123");
+    const empty = await (await fetch(`${url}/api/drive115/scan?parentId=7&start=2&end=501`)).json();
+    assert.deepEqual(empty.files, []);
+    const blank = await (await fetch(`${url}/api/drive115/scan?parentId=7&folderName=Series&start=&end=`)).json();
+    assert.deepEqual(blank, scan);
+    assert.equal((await fetch(`${url}/api/drive115/scan?parentId=7&start=1000&end=500`)).status, 400);
+    const settings = await fetch(`${url}/api/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: { scanFolderExclusionRules: [`*${video.name}*`], scanVideoExclusionRules: [] } }),
+    });
+    assert.equal(settings.status, 200);
+    assert.deepEqual(await (await fetch(`${url}/api/drive115/scan?parentId=7&folderName=Series`)).json(), scan);
+    const videoRules = await fetch(`${url}/api/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: { scanFolderExclusionRules: [], scanVideoExclusionRules: [`*${video.name}*`] } }),
+    });
+    assert.equal(videoRules.status, 200);
+    assert.deepEqual((await (await fetch(`${url}/api/drive115/scan?parentId=7`)).json()).files, []);
     assert.equal((await post("save", { resultId: "missing" })).status, 404);
     await post("logout", {});
     assert.equal((await (await fetch(`${url}/api/drive115/status`)).json()).account, null);
@@ -427,6 +444,53 @@ test("115 文件夹分页递归扫描，只用同目录字幕判定并遵守扫�
   assert.equal(scan.truncated, false);
   assert.equal(calls.filter(({ url }) => url.pathname === "/files").length, 4);
   await assert.rejects(drive.save(video, payload, true, "999"), /登录账号已变更/);
+});
+
+test("115 视频名和文件夹名各自匹配，扫描范围按过滤后的视频计算", async () => {
+  const { drive, login, calls } = fixture({ directories: {
+    7: [{ cid: "8", pid: "7", n: "中文电影" }, { cid: "9", pid: "7", n: "Extras" },
+      { fid: "46", cid: "7", n: "Extras.mp4" }, { fid: "47", cid: "7", n: "片名-ChS.mp4" }],
+    8: [{ fid: "48", cid: "8", n: "片名.mp4" }, { fid: "49", cid: "8", n: "片名-中文.mp4" }],
+    9: [{ fid: "50", cid: "9", n: "花絮.mp4" }],
+  } });
+  await login();
+  const scan = await drive.scanFolder("7", ["Extras*"], "", { videoExclusionRules: ["*中文*", "*-CHS.*"] });
+  assert.deepEqual(scan.files.map(({ id }) => id), ["46", "48"]);
+  assert.equal(calls.some(({ url }) => url.pathname === "/files" && url.searchParams.get("cid") === "9"), false);
+  const second = await drive.scanFolder("7", ["Extras*"], "", { start: 2, end: 2, videoExclusionRules: ["*中文*", "*-CHS.*"] });
+  assert.deepEqual(second.files.map(({ id }) => id), ["48"]);
+  assert.equal(second.truncated, false);
+});
+
+test("115 大目录可全量扫描或按范围载入视频", async () => {
+  function videos(parentId, start, count) {
+    return Array.from({ length: count }, (_, index) => {
+      const position = start + index;
+      return { fid: String(10000 + position), cid: parentId, n: `Episode ${position}.mp4` };
+    });
+  }
+
+  const { drive, login } = fixture({ directories: {
+    7: [...videos("7", 1, 480), { cid: "8", pid: "7", n: "Series" }, { cid: "9", pid: "7", n: "Extras" },
+      ...Array.from({ length: 418 }, (_, index) => ({ fid: String(50000 + index), cid: "7", n: `Readme ${index}.txt` }))],
+    8: [...videos("8", 481, 700), { fid: "43", cid: "8", n: "Episode 501.srt" }],
+    9: [{ fid: "44", cid: "9", n: "Sample.mp4" }],
+  } });
+  await login();
+  const all = await drive.scanFolder("7", ["Extras"], "Collection");
+  const first = await drive.scanFolder("7", ["Extras"], "Collection", { end: 500 });
+  const second = await drive.scanFolder("7", ["Extras"], "Collection", { start: 501, end: 1000 });
+  const last = await drive.scanFolder("7", ["Extras"], "Collection", { start: 1001 });
+  const wide = await drive.scanFolder("7", ["Extras"], "Collection", { start: 101, end: 1000 });
+  assert.deepEqual([all, first, second, last, wide].map(({ files, truncated }) => [files.length, truncated]),
+    [[1180, false], [500, true], [500, true], [180, false], [900, true]]);
+  assert.deepEqual(all.files.map(({ id }) => id),
+    Array.from({ length: 1180 }, (_, index) => String(10001 + index)));
+  assert.deepEqual([...first.files, ...second.files, ...last.files], all.files);
+  assert.deepEqual(wide.files, all.files.slice(100, 1000));
+  assert.deepEqual(second.files[0].existingSubtitles, ["Episode 501.srt"]);
+  assert.equal(second.files[0].parentId, "8");
+  assert.deepEqual(second.files[0].parentNames, ["Collection", "Series"]);
 });
 
 test("115 名称、添加时间及更新时间升降序，搜索分页保留真实父目录", async () => {

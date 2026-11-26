@@ -21,7 +21,7 @@ import {
   compareMediaEntries,
   findExistingSubtitles,
 } from "../public/media-library.js";
-import { createScanExclusionMatcher, parseScanExclusionRules } from "../public/scan-rules.js";
+import { createScanExclusionMatcher } from "../public/scan-rules.js";
 import { startServer } from "../server.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -231,8 +231,7 @@ ipcMain.handle("subtitle:select-video-dir", async (event, payload = {}) => {
 
   // 3.3 扫描视频文件
   const directory = selected.filePaths[0];
-  const excludeRules = parseScanExclusionRules(payload.excludeRules || []);
-  const files = await scanVideoFiles(directory, { excludeRules });
+  const files = await scanVideoFiles(directory, { scanRules: payload });
   logger.info("选择视频目录完成", directory, files.length);
   return { selected: true, directory, files };
 });
@@ -555,11 +554,11 @@ ipcMain.handle("subtitle:set-context-menu-state", async (_event, payload = {}) =
 });
 
 // 4.9.3 消费当前待处理路径
-ipcMain.handle("subtitle:consume-launch-target", async () => {
+ipcMain.handle("subtitle:consume-launch-target", async (event, scanRules) => {
   const target = pendingLaunchTarget;
   pendingLaunchTarget = "";
   if (!target) return { selected: false };
-  return loadLaunchTarget(target);
+  return loadLaunchTarget(target, scanRules);
 });
 
 logger.info("Windows 右键菜单接口绑定完成");
@@ -918,7 +917,9 @@ async function scanVideoFiles(directory, options = {}) {
   const results = [];
   const requestedVideoPath = String(options.targetPath || "").trim();
   const requestedVideoKey = requestedVideoPath ? path.resolve(requestedVideoPath).toLowerCase() : "";
-  const shouldExcludePath = createScanExclusionMatcher(requestedVideoKey ? [] : options.excludeRules || []);
+  const { scanFolderExclusionRules, scanVideoExclusionRules, excludeRules } = requestedVideoKey ? {} : options.scanRules || {};
+  const excludeFolder = createScanExclusionMatcher(scanFolderExclusionRules ?? excludeRules);
+  const excludeVideo = createScanExclusionMatcher(scanVideoExclusionRules ?? excludeRules);
   const stack = [{
     directory,
     parentNames: [path.basename(directory), path.basename(path.dirname(directory))],
@@ -949,7 +950,7 @@ async function scanVideoFiles(directory, options = {}) {
       const relativePath = path.relative(directory, fullPath);
       if (entry.isDirectory()) {
         if (requestedVideoKey) continue;
-        if (shouldExcludePath(relativePath)) continue;
+        if (excludeFolder(relativePath)) continue;
         stack.push({
           directory: fullPath,
           parentNames: [entry.name, ...current.parentNames],
@@ -959,7 +960,7 @@ async function scanVideoFiles(directory, options = {}) {
       }
       if (!entry.isFile() || !VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
       if (requestedVideoKey && path.resolve(fullPath).toLowerCase() !== requestedVideoKey) continue;
-      if (!requestedVideoKey && shouldExcludePath(relativePath)) continue;
+      if (excludeVideo(relativePath)) continue;
       const sameNameNfo = nfoFiles.get(`${path.basename(entry.name, path.extname(entry.name)).toLowerCase()}.nfo`);
       const nfoMetadata = mergeNfoMetadata(directoryMetadata, sameNameNfo);
       const media = analyzeMediaFile(entry.name, { parentNames: current.parentNames, nfoMetadata });
@@ -1231,7 +1232,7 @@ function configureApplicationMenu() {
   logger.info("桌面菜单配置完成");
 }
 
-async function loadLaunchTarget(targetPath) {
+async function loadLaunchTarget(targetPath, scanRules) {
   /*
    * ================================================================================
    * 步骤8.3：载入 Windows 右键目标
@@ -1256,7 +1257,7 @@ async function loadLaunchTarget(targetPath) {
   }
 
   // 8.3.2 扫描目录并保留目标视频
-  const files = await scanVideoFiles(directory, { targetPath: videoPath });
+  const files = await scanVideoFiles(directory, { targetPath: videoPath, scanRules });
   logger.info("载入 Windows 右键目标完成", files.length);
   return { selected: true, directory, label: directory, videoPath, files };
 }

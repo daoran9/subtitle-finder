@@ -11,6 +11,7 @@ import { inflateRawSync } from "zlib";
 import iconv from "iconv-lite";
 import SevenZip from "7z-wasm";
 import unrar from "node-unrar-js";
+import packageInfo from "./package.json" with { type: "json" };
 import { createRuntimeStore } from "./lib/runtime-store.mjs";
 import { Drive115 } from "./lib/drive115.mjs";
 import {
@@ -40,7 +41,7 @@ const SUBHD_SEARCH_TIMEOUT_MS = 24000;
 const SUBHD_SESSION_RETRY_DELAY_MS = 350;
 const RESULT_CACHE = new Map();
 const SUBTITLE_PAYLOAD_CACHE = new Map();
-const STRICT_CATALOG_SOURCE_KEYS = new Set(["thunder", "subtitlecat", "avsubtitles", "aiyi"]);
+const STRICT_CATALOG_SOURCE_KEYS = new Set(["thunder", "subtitlecat", "avsubtitles", "aiyi", "subhd", "tvsubtitles"]);
 const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const SEARCH_CACHE_PARTIAL_TTL_MS = 5 * 60 * 1000;
 const SUBTITLE_PAYLOAD_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -71,7 +72,7 @@ const SEVEN_ZIP_WASM_PATH = path.join(__dirname, "vendor", "7zz.wasm");
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt", ".sub"];
 let runtimePort = DEFAULT_PORT;
 let runtimeStore = null;
-let runtimePreferences = { scanExclusionRules: [], subtitleExclusionKeywords: "", customDictionary: "", matchVideoName: true, autoConvertChinese: false, preferredChinese: "zh-CN" };
+let runtimePreferences = { scanVideoExclusionRules: [], scanFolderExclusionRules: [], subtitleExclusionKeywords: "", customDictionary: "", matchVideoName: true, autoConvertChinese: false, preferredChinese: "zh-CN" };
 let unrarWasmBinaryPromise = null;
 let sevenZipWasmBinaryPromise = null;
 const assrtFileDnsCache = new Map();
@@ -215,7 +216,7 @@ async function routeRequest(req, res, drive115) {
 
   // 2.2 健康检查
   if (url.pathname === "/api/health") {
-    sendJson(res, 200, { ok: true, port: runtimePort });
+    sendJson(res, 200, { ok: true, port: runtimePort, version: packageInfo.version });
     logger.info("请求分发完成: health");
     return;
   }
@@ -347,7 +348,13 @@ async function handleDrive115(req, res, url, drive) {
     }
     if (req.method === "GET" && action === "scan") {
       const parentId = url.searchParams.get("parentId");
-      return sendJson(res, 200, await drive.scanFolder(parentId, runtimePreferences.scanExclusionRules, url.searchParams.get("folderName")));
+      const start = url.searchParams.get("start")?.trim();
+      const end = url.searchParams.get("end")?.trim();
+      return sendJson(res, 200, await drive.scanFolder(parentId, runtimePreferences.scanFolderExclusionRules, url.searchParams.get("folderName"), {
+        start: start ? Number(start) : undefined,
+        end: end ? Number(end) : undefined,
+        videoExclusionRules: runtimePreferences.scanVideoExclusionRules,
+      }));
     }
     if (req.method === "GET" && action === "qr-image") {
       const image = await drive.qrImage(url.searchParams.get("id"));
@@ -439,7 +446,7 @@ async function handleSearch(req, url, res) {
     metadataAliases,
     assrtToken,
   });
-  const cachedSearch = runtimeStore?.getSearch(searchCacheKey);
+  const cachedSearch = url.searchParams.get("refresh") === "1" ? null : runtimeStore?.getSearch(searchCacheKey);
   if (cachedSearch?.value) {
     const cachedPayload = restoreCachedSearchPayload(cachedSearch.value, cachedSearch.createdAt);
     sendJson(res, 200, cachedPayload);
@@ -639,6 +646,30 @@ class SubtitleExcludedError extends Error {
   }
 }
 
+class SubtitleReadError extends Error {
+  constructor(message, { stage, httpStatus, responseType, invalidContent = false } = {}) {
+    super(message);
+    this.stage = stage;
+    this.httpStatus = httpStatus;
+    this.responseType = responseType;
+    this.invalidContent = invalidContent;
+  }
+}
+
+function logSubtitleReadFailure(result, error) {
+  const sourceEntryId = result.source === "avsubtitles"
+    ? result.detailUrl?.match(/\/subtitles\/[^/]+\/(\d+)/)?.[1] : undefined;
+  logger.warn("字幕读取失败", {
+    source: result.source,
+    query: result.searchQuery,
+    entryId: sourceEntryId || result.id,
+    stage: error.stage || "download",
+    status: error.httpStatus,
+    responseType: error.responseType,
+    invalidContent: error.invalidContent || undefined,
+  });
+}
+
 async function handleBatchState(req, res) {
   /*
    * ================================================================================
@@ -652,8 +683,8 @@ async function handleBatchState(req, res) {
 
   // 3.9.1 返回持久化状态
   if (req.method === "GET") {
-    const state = await runtimeStore?.readBatchState();
-    sendJson(res, 200, { state });
+    const workspace = await runtimeStore.readBatchWorkspace();
+    sendJson(res, 200, workspace);
     logger.info("处理批量任务状态完成: read");
     return;
   }
@@ -663,12 +694,18 @@ async function handleBatchState(req, res) {
     try {
       const body = await readJsonRequest(req, 4 * 1024 * 1024);
       const result = await runtimeStore?.writeBatchState(body?.state);
-      sendJson(res, 200, { saved: true, updatedAt: result?.updatedAt || Date.now() });
+      sendJson(res, 200, { saved: true, ...result });
       logger.info("处理批量任务状态完成: saved");
     } catch (error) {
       sendJson(res, 400, { error: "批量任务状态无效", detail: String(error?.message || error) });
       logger.info("处理批量任务状态完成: invalid", error.message);
     }
+    return;
+  }
+
+  if (req.method === "POST") {
+    const workspace = await runtimeStore.restorePreviousBatch();
+    sendJson(res, workspace ? 200 : 404, workspace || { error: "没有可恢复的上一批任务" });
     return;
   }
 
@@ -698,7 +735,7 @@ async function handleAppSettings(req, res) {
   // 3.10.2 校验并保存设置
   if (req.method === "PUT") {
     try {
-      const body = await readJsonRequest(req, 64 * 1024);
+      const body = await readJsonRequest(req, 256 * 1024);
       const result = await runtimeStore?.writePreferences(body?.settings);
       runtimePreferences = result?.preferences || runtimePreferences;
       sendJson(res, 200, { saved: true, settings: runtimePreferences, updatedAt: result?.updatedAt || Date.now() });
@@ -1628,7 +1665,7 @@ async function handlePreview(url, res) {
   try {
     validated = await getValidatedSubtitlePayload(result, language, conversion);
   } catch (error) {
-    sendJson(res, 422, { excluded: error instanceof SubtitleExcludedError, error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { excluded: error instanceof SubtitleExcludedError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("预览字幕完成: 校验失败", error.message);
     return;
   }
@@ -1692,7 +1729,7 @@ async function handleValidate(url, res) {
     });
     logger.info("校验字幕候选完成: valid");
   } catch (error) {
-    sendJson(res, 422, { valid: false, excluded: error instanceof SubtitleExcludedError, error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { valid: false, excluded: error instanceof SubtitleExcludedError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("校验字幕候选完成: invalid", error.message);
   }
 }
@@ -1759,7 +1796,10 @@ async function getValidatedSubtitlePayload(result, language, conversion, { forSa
   pruneSubtitlePayloadCache();
   let original = SUBTITLE_PAYLOAD_CACHE.get(cacheKey);
   if (!original || original.expiresAt <= Date.now()) {
-    const payload = await fetchSubtitleBytes(result, language);
+    const payload = await fetchSubtitleBytes(result, language).catch((error) => {
+      logSubtitleReadFailure(result, error);
+      throw error;
+    });
     const decoded = decodeSubtitle(payload.buffer, payload.contentType, language);
     const { dialogueText, ...validation } = validateSubtitleText(decoded.text, {
       fileName: payload.fileName,
@@ -1767,7 +1807,16 @@ async function getValidatedSubtitlePayload(result, language, conversion, { forSa
       language,
       includeDialogue: true,
     });
-    if (!validation.valid) throw new Error(validation.message || "字幕结构无效");
+    if (!validation.valid) {
+      const error = new SubtitleReadError(validation.message || "字幕结构无效", {
+        stage: validation.reason === "html" ? "file-download" : "content-validation",
+        httpStatus: payload.httpStatus,
+        responseType: payload.responseType || payload.contentType,
+        invalidContent: true,
+      });
+      logSubtitleReadFailure(result, error);
+      throw error;
+    }
     const normalizedPayload = normalizeSubtitlePayload(payload, decoded);
     original = { payload: normalizedPayload, decoded, validation, dialogueText, expiresAt: Date.now() + SUBTITLE_PAYLOAD_CACHE_TTL_MS };
     SUBTITLE_PAYLOAD_CACHE.delete(cacheKey);
@@ -2699,7 +2748,7 @@ async function searchTvSubtitles(query, language, limit) {
   }
 
   // 11.2 请求剧集搜索页
-  const response = await fetchWithTimeout(new URL("/search1.php", TV_SUBTITLES_BASE_URL).href, {
+  const response = await fetchWithTimeout(new URL("/search2.php", TV_SUBTITLES_BASE_URL).href, {
     method: "POST",
     headers: { ...browserHeaders, "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ qs: query }).toString(),
@@ -3412,11 +3461,11 @@ async function fetchSubtitleBytes(result, language) {
   });
   if (extracted) {
     logger.info(`拉取字幕字节完成: ${extracted.fileName}`);
-    return extracted;
+    return { ...extracted, httpStatus: response.status, responseType: contentType };
   }
 
   logger.info(`拉取字幕字节完成: ${buffer.length} bytes`);
-  return { buffer, contentType, fileName };
+  return { buffer, contentType, fileName, httpStatus: response.status };
 }
 
 async function fetchSubHdPayload(result, language) {
@@ -3676,16 +3725,23 @@ async function fetchAvSubtitlesPayload(result, language) {
 
   // 11.1 建立会话并读取详情页
   let cookieJar = "";
-  const fetchWithSession = async (url, referer) => {
+  const fetchWithSession = async (url, referer, stage) => {
     const response = await fetchWithTimeout(url, {
       headers: { ...browserHeaders, referer: referer || AV_SUBTITLES_BASE_URL, cookie: cookieJar },
       allowErrorStatus: true,
+    }).catch((error) => {
+      throw new SubtitleReadError(error.message, { stage });
     });
+    if (!response.ok) {
+      throw new SubtitleReadError(`AVSubtitles 请求失败: ${response.status}`, {
+        stage, httpStatus: response.status, responseType: response.headers.get("content-type"),
+      });
+    }
     cookieJar = mergeCookieJar(cookieJar, response);
     return response;
   };
 
-  const detailResponse = await fetchWithSession(result.detailUrl, AV_SUBTITLES_BASE_URL);
+  const detailResponse = await fetchWithSession(result.detailUrl, AV_SUBTITLES_BASE_URL, "detail-page");
   const detailHtml = await detailResponse.text();
 
   // 11.2 解析下载页参数
@@ -3693,24 +3749,25 @@ async function fetchAvSubtitlesPayload(result, language) {
   const revId = matchFirst(detailHtml, /name=["']revid["']\s+value=["']([^"']+)["']/i);
   const declaredFileName = htmlDecode(stripTags(matchFirst(detailHtml, /<span\b[^>]*class=["']text-mono["'][^>]*>([\s\S]*?)<\/span>/i))).trim();
   if (!subId || !revId) {
-    throw new Error("AVSubtitles 没有找到下载参数");
+    throw new SubtitleReadError("AVSubtitles 详情页没有找到下载参数", {
+      stage: "detail-page", httpStatus: detailResponse.status, responseType: detailResponse.headers.get("content-type"),
+    });
   }
 
   // 11.3 打开下载页并解析最终链接
   const downloadPageUrl = `${AV_SUBTITLES_BASE_URL}/download_page.php?subid=${encodeURIComponent(subId)}&revid=${encodeURIComponent(revId)}`;
-  const downloadPageResponse = await fetchWithSession(downloadPageUrl, result.detailUrl);
+  const downloadPageResponse = await fetchWithSession(downloadPageUrl, result.detailUrl, "download-page");
   const downloadPageHtml = await downloadPageResponse.text();
   const href = matchFirst(downloadPageHtml, /href=["']([^"']*download_sub\.php\?subid=[^"']+)["']/i);
   if (!href) {
-    throw new Error("AVSubtitles 没有找到最终下载地址");
+    throw new SubtitleReadError("AVSubtitles 下载页没有找到最终下载地址", {
+      stage: "download-page", httpStatus: downloadPageResponse.status, responseType: downloadPageResponse.headers.get("content-type"),
+    });
   }
 
   // 11.4 请求最终字幕文件
   const downloadUrl = new URL(htmlDecode(href), downloadPageUrl).href;
-  const fileResponse = await fetchWithSession(downloadUrl, downloadPageUrl);
-  if (!fileResponse.ok) {
-    throw new Error(`AVSubtitles 下载失败: ${fileResponse.status}`);
-  }
+  const fileResponse = await fetchWithSession(downloadUrl, downloadPageUrl, "file-download");
   const buffer = Buffer.from(await fileResponse.arrayBuffer());
   const contentType = fileResponse.headers.get("content-type") || "application/octet-stream";
   const dispositionName = parseContentDispositionFileName(fileResponse.headers.get("content-disposition") || "");
@@ -3724,7 +3781,7 @@ async function fetchAvSubtitlesPayload(result, language) {
     catalogCode: result.requestedCatalogCode || result.catalogCode,
   });
   logger.info("拉取 AVSubtitles 字幕完成", fileName);
-  return extracted || { buffer, contentType, fileName };
+  return { ...(extracted || { buffer, contentType, fileName }), httpStatus: fileResponse.status, responseType: contentType };
 }
 
 function mergeCookieJar(cookieJar, response) {
@@ -4861,7 +4918,6 @@ function buildSubtitleEncodingCandidates(charset, language, unicodeEncoding = ""
    * 1) 优先处理 BOM 或 UTF-16 字节特征
    * 2) 再尊重服务端 charset，并按字幕语言补充候选
    */
-  logger.info("开始生成字幕编码候选...");
 
   // 14.1 按语言排列候选
   const candidatesByLanguage = {
@@ -4876,7 +4932,6 @@ function buildSubtitleEncodingCandidates(charset, language, unicodeEncoding = ""
 
   // 14.2 去重后返回
   const encodings = [...new Set(ordered)];
-  logger.info("生成字幕编码候选完成", encodings.join(", "));
   return encodings;
 }
 
@@ -4981,7 +5036,6 @@ function scoreDecodedSubtitleText(text, language) {
    * 1) 惩罚替换符、控制字符和典型 mojibake 乱码
    * 2) 奖励目标语言字符，减少中文乱码误判
    */
-  logger.info("开始给解码文本评分...");
 
   // 15.1 统计异常字符
   const value = String(text || "");
@@ -5001,7 +5055,6 @@ function scoreDecodedSubtitleText(text, language) {
   }
 
   const score = replacementCount * 1000 + nulCount * 200 + controlCount * 40 + mojibakeCount * 30 - languageSignal;
-  logger.info("给解码文本评分完成", score);
   return score;
 }
 

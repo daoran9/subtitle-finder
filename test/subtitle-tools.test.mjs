@@ -109,6 +109,16 @@ test("网页和无时间轴文本不会被当成字幕", () => {
   assert.equal(validateSubtitleText("这只是说明文字，没有任何时间轴。", { fileName: "x.srt" }).valid, false);
 });
 
+test("时间轴正常但正文密集乱码的字幕会被拒绝", () => {
+  for (const marker of ["锟斤拷", "ï¿½", "�"]) {
+    const damaged = VALID_SRT.replace("这个软件在出租车里面运行。", marker.repeat(18));
+    const result = validateSubtitleText(damaged);
+    assert.equal(result.valid, false, marker);
+    assert.match(result.message, /正文含大量乱码/);
+  }
+  assert.equal(validateSubtitleText(VALID_SRT.replace("字幕", "字�")).valid, true);
+});
+
 // 1.4 语言不符的有效字幕仍可预览和下载
 test("中文搜索仍展示纯英文长字幕并标记提示", () => {
   const english = `1\n00:00:01,000 --> 00:00:05,000\nThis subtitle contains only English dialogue and does not match the requested Chinese language.\n`;

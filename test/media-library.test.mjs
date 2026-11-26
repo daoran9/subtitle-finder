@@ -96,6 +96,13 @@ test("已有字幕只匹配同一集", () => {
   assert.deepEqual(subtitles, ["Daria.S01E02.en.ass", "Daria.S01E02.zh-CN.srt"]);
 });
 
+test("带年份的剧名按季集号区分已有字幕", () => {
+  const name = "Sample-2024 S01E502.mp4";
+  assert.equal(analyzeMediaFile(name).mediaType, "episode");
+  assert.deepEqual(findExistingSubtitles(name, ["Sample-2024 S01E501.srt", "Sample-2024 S01E502.srt"]),
+    ["Sample-2024 S01E502.srt"]);
+});
+
 // 2.2 只有季集号时仍能识别同目录字幕
 test("无作品名时按季集号匹配字幕", () => {
   const subtitles = findExistingSubtitles(

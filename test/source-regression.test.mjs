@@ -131,7 +131,8 @@ test("SubHD 使用内置地址且设置按平台划分", async () => {
   assert.doesNotMatch(appSource, /subhdBaseUrl|\/api\/settings\/sources/);
   assert.match(appSource, /settingsButton\.hidden = !window\.subtitleFinder/);
   assert.match(appSource, /contextMenuSetting\.hidden = !window\.subtitleFinder\.getContextMenuState/);
-  assert.match(html, /id="scanExclusionRulesInput"/);
+  assert.match(html, /id="scanVideoExclusionRulesInput"/);
+  assert.match(html, /id="scanFolderExclusionRulesInput"/);
   assert.match(html, /id="customDictionaryInput"/);
   assert.match(html, /id="settingsButton"[^>]*hidden/);
   assert.doesNotMatch(html, /SubHD 地址|恢复默认/);
@@ -372,6 +373,19 @@ test("合并结果会排除相邻番号", () => {
     { queryVariants: ["JAC-089"], catalogIdentity }
   );
   assert.deepEqual(results.map((item) => item.fileName), ["JAC-089.zh.srt"]);
+});
+
+test("番号查询排除 SubHD 和 TVSubtitles 返回的无关剧集", () => {
+  const catalogIdentity = extractAvIdentity("BF-342");
+  const unrelated = { title: "Mike and Molly S06E01", fileName: "Mike and Molly S06E01.srt" };
+  const rows = [
+    { source: "subhd", ...unrelated },
+    { source: "tvsubtitles", ...unrelated },
+    { source: "subhd", title: "BF-342", fileName: "BF-342.srt" },
+  ];
+  const results = mergeSearchResultBuckets([rows], 10, { catalogIdentity });
+  assert.deepEqual(results.map((item) => item.fileName), ["BF-342.srt"]);
+  assert.equal(mergeSearchResultBuckets([rows], 10, { queryVariants: ["Mike and Molly"] }).length, 2);
 });
 
 // 3.4.1.1 不能因为来源元数据写了目标码，就忽略标题里的冲突号码。

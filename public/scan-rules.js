@@ -37,6 +37,14 @@ export function parseScanExclusionRules(value) {
   return rules;
 }
 
+export function parseScanExclusionSettings(settings = {}) {
+  const legacyRules = settings.scanExclusionRules;
+  return {
+    scanVideoExclusionRules: parseScanExclusionRules(settings.scanVideoExclusionRules ?? legacyRules),
+    scanFolderExclusionRules: parseScanExclusionRules(settings.scanFolderExclusionRules ?? legacyRules),
+  };
+}
+
 /*
  * ================================================================================
  * 步骤2：匹配扫描路径

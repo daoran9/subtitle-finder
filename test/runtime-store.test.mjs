@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { createRuntimeStore } from "../lib/runtime-store.mjs";
@@ -70,11 +70,13 @@ test("批量任务中断后恢复为等待继续", async () => {
         videoPath: "E:\\Media\\Daria.S01E01.mkv",
         status: "searching",
         message: "正在搜索",
+        automaticSavedHashes: ["a".repeat(64), "invalid"],
         retryCount: 2,
       }],
       batchStatus: "running",
       namingPreset: "jellyfin",
       batchConcurrency: 3,
+      batchSaveCount: 3,
       language: "zh-CN",
     });
 
@@ -83,14 +85,47 @@ test("批量任务中断后恢复为等待继续", async () => {
     assert.equal(restored.batchStatus, "paused");
     assert.equal(restored.batchTasks[0].status, "pending");
     assert.equal(restored.batchTasks[0].retryCount, 2);
+    assert.deepEqual(restored.batchTasks[0].automaticSavedHashes, ["a".repeat(64)]);
     assert.match(restored.batchTasks[0].message, /中断/);
     assert.equal(restored.namingPreset, "jellyfin");
+    assert.equal(restored.batchSaveCount, 3);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
 logger.info("验证批量任务恢复完成");
+
+test("切换目录后保留待办和已完成进度，重启后可恢复", async () => {
+  const directory = await mkdtemp(path.join(process.cwd(), ".test-runtime-store-"));
+  const buildBatch = (label, statuses) => {
+    const videoFiles = [1, 2].map((number) => ({ name: `Video-${number}.mp4`, path: `${label}/Video-${number}.mp4` }));
+    return {
+      videoDirectoryId: label,
+      videoDirectoryLabel: label,
+      videoFiles,
+      batchTasks: statuses.map((status, index) => ({ id: `${label}-${index}`, videoPath: videoFiles[index].path, status })),
+      batchStatus: statuses.length ? "paused" : "idle",
+    };
+  };
+  try {
+    const store = createRuntimeStore(directory);
+    await store.writeBatchState(buildBatch("A", ["saved", "pending"]));
+    const switched = await store.writeBatchState(buildBatch("B", []));
+    assert.equal(switched.previousBatch.label, "A");
+    await store.writeBatchState(buildBatch("B", ["failed"]));
+    const restoredStore = createRuntimeStore(directory);
+    const current = await restoredStore.readBatchWorkspace();
+    assert.equal(current.state.videoDirectoryLabel, "B");
+    assert.equal(current.previousBatch.label, "A");
+    const recovered = await restoredStore.restorePreviousBatch();
+    assert.deepEqual(recovered.state.batchTasks.map((task) => task.status), ["saved", "pending"]);
+    assert.equal(recovered.previousBatch.label, "B");
+    assert.equal((await restoredStore.restorePreviousBatch()).state.batchTasks[0].status, "failed");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 /*
  * ================================================================================
@@ -115,8 +150,14 @@ test("通用设置跨重启恢复并限制字段", async () => {
     assert.equal(defaults.subtitleExclusionKeywords, "");
     assert.equal(defaults.subtitleSaveFilter.enabled, false);
     assert.deepEqual(defaults.subtitleSaveFilter.keywords.split("\n"), ["色花", "色花堂", "sehua", "sehuatang", "98T", "98堂", "[括号说明]"]);
+    const legacyRules = ["**/Extras/**", "*.sample.*"];
+    await writeFile(path.join(directory, "preferences.json"), JSON.stringify({ version: 1, preferences: { scanExclusionRules: legacyRules } }));
+    const migrated = await store.readPreferences();
+    assert.deepEqual(migrated.scanVideoExclusionRules, legacyRules);
+    assert.deepEqual(migrated.scanFolderExclusionRules, legacyRules);
     await store.writePreferences({
-      scanExclusionRules: ["**/Extras/**", "*.sample.*"],
+      scanVideoExclusionRules: ["*.sample.*", "*-CHS.*"],
+      scanFolderExclusionRules: [],
       subtitleExclusionKeywords: "机器翻译\nBad release",
       subtitleSaveFilter: { enabled: true, keywords: "  版本标记  " },
       customDictionary: "软件=軟件\n出租车=計程車",
@@ -130,7 +171,8 @@ test("通用设置跨重启恢复并限制字段", async () => {
     const restored = createRuntimeStore(directory);
     await restored.initialize();
     assert.deepEqual(await restored.readPreferences(), {
-      scanExclusionRules: ["**/Extras/**", "*.sample.*"],
+      scanVideoExclusionRules: ["*.sample.*", "*-CHS.*"],
+      scanFolderExclusionRules: [],
       subtitleExclusionKeywords: "机器翻译\nBad release",
       subtitleSaveFilter: { enabled: true, keywords: "版本标记" },
       customDictionary: "软件=軟件\n出租车=計程車",

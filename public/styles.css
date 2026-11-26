@@ -310,6 +310,21 @@ button:hover,
   overflow: auto;
 }
 
+.video-list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.video-list-pagination button {
+  min-height: 28px;
+  padding: 0 8px;
+}
+
 .video-scan-meta {
   display: flex;
   align-items: center;
@@ -1016,6 +1031,7 @@ tbody tr.is-active {
 .drive115-path, .drive115-pagination, .drive115-search, .drive115-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; }
 .drive115-search input { flex: 1 1 150px; min-width: 0; }
 .drive115-controls select { width: auto; margin: 0; }
+.drive115-scan input { width: 7ch; box-sizing: content-box; }
 .drive115-files { display: grid; gap: 5px; max-height: 40vh; overflow-y: auto; }
 .drive115-files .drive115-file { text-align: left; overflow-wrap: anywhere; width: 100%; }
 .drive115-file-label { padding: 7px 10px; color: var(--muted); overflow-wrap: anywhere; }

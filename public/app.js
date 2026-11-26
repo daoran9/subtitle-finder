@@ -1,8 +1,10 @@
 import { analyzeMediaFile, compareMediaEntries, findExistingSubtitles, formatMediaDuration } from "./media-library.js";
 import { analyzeSubtitleLanguage, buildSubtitleBaseName } from "./subtitle-rules.js";
 import { parseCustomConversionDictionary } from "./conversion-dictionary.js";
-import { parseScanExclusionRules } from "./scan-rules.js";
+import { parseScanExclusionSettings } from "./scan-rules.js";
 import { initDrive115 } from "./drive115.js";
+
+const VIDEO_LIST_PAGE_SIZE = 80;
 
 const state = {
   results: [],
@@ -18,6 +20,7 @@ const state = {
   downloadDir: "",
   downloadDirLabel: "",
   videoFiles: [],
+  videoListPage: 0,
   activeVideoPath: "",
   videoDirectoryLabel: "",
   videoDirectoryId: "",
@@ -29,16 +32,19 @@ const state = {
   batchTasks: [],
   batchStatus: "idle",
   batchSaving: false,
+  batchSwitching: false,
   batchRunId: 0,
+  batchRunPromise: null,
   batchControllers: new Map(),
   searchController: null,
   searchRankingController: null,
   searchRunId: 0,
+  refreshResultSummary: null,
   previewController: null,
   conversionTarget: "",
   autoConvertChinese: false,
   preferredChinese: "zh-CN",
-  scanExclusionRules: [],
+  scanExclusions: { scanVideoExclusionRules: [], scanFolderExclusionRules: [] },
   subtitleExclusionKeywords: "",
   subtitleSaveFilter: {},
   customDictionary: "",
@@ -47,6 +53,8 @@ const state = {
   batchStateSaveTimer: null,
   batchStateSavePromise: null,
   batchStateTouched: false,
+  previousBatch: null,
+  storedLocalBatch: false,
   syncJobId: "",
   syncStatus: "idle",
   syncProgress: 0,
@@ -72,6 +80,7 @@ const nodes = {
   settingsButton: document.querySelector("#settingsButton"),
   aboutButton: document.querySelector("#aboutButton"),
   appVersion: document.querySelector("#appVersion"),
+  aboutVersion: document.querySelector("#aboutVersion"),
   updateLink: document.querySelector("#updateLink"),
   checkUpdatesButton: document.querySelector("#checkUpdatesButton"),
   aboutUpdateLink: document.querySelector("#aboutUpdateLink"),
@@ -107,7 +116,8 @@ const nodes = {
   contextMenuToggle: document.querySelector("#contextMenuToggle"),
   settingsMessage: document.querySelector("#settingsMessage"),
   settingsPlatformLabel: document.querySelector("#settingsPlatformLabel"),
-  scanExclusionRules: document.querySelector("#scanExclusionRulesInput"),
+  scanVideoExclusionRules: document.querySelector("#scanVideoExclusionRulesInput"),
+  scanFolderExclusionRules: document.querySelector("#scanFolderExclusionRulesInput"),
   subtitleExclusionKeywords: document.querySelector("#subtitleExclusionKeywordsInput"),
   subtitleSaveFilterEnabled: document.querySelector("#subtitleSaveFilterEnabled"),
   subtitleSaveFilterKeywords: document.querySelector("#subtitleSaveFilterKeywords"),
@@ -118,6 +128,7 @@ const nodes = {
   scanVideoButton: document.querySelector("#scanVideoButton"),
   batchPanel: document.querySelector("#batchPanel"),
   startBatchButton: document.querySelector("#startBatchButton"),
+  restoreBatchButton: document.querySelector("#restoreBatchButton"),
   pauseBatchButton: document.querySelector("#pauseBatchButton"),
   retryBatchButton: document.querySelector("#retryBatchButton"),
   batchProgress: document.querySelector("#batchProgress"),
@@ -126,6 +137,8 @@ const nodes = {
   cloudBatchNaming: document.querySelector("#cloudBatchNaming"),
   batchConcurrency: document.querySelector("#batchConcurrencySelect"),
   batchMode: document.querySelector("#batchModeSelect"),
+  batchSaveCountLabel: document.querySelector("#batchSaveCountLabel"),
+  batchSaveCount: document.querySelector("#batchSaveCountSelect"),
   batchIncludeLabel: document.querySelector("#batchIncludeLabel"),
   batchIncludeExisting: document.querySelector("#batchIncludeExisting"),
   openBatchReview: document.querySelector("#openBatchReview"),
@@ -139,6 +152,10 @@ const nodes = {
   videoScanSummary: document.querySelector("#videoScanSummary"),
   missingOnlyToggle: document.querySelector("#missingOnlyToggle"),
   videoList: document.querySelector("#videoList"),
+  videoListPagination: document.querySelector("#videoListPagination"),
+  videoListPage: document.querySelector("#videoListPage"),
+  videoListPrevious: document.querySelector("#videoListPrevious"),
+  videoListNext: document.querySelector("#videoListNext"),
   recentList: document.querySelector("#recentList"),
   clearRecentButton: document.querySelector("#clearRecentButton"),
 };
@@ -152,11 +169,7 @@ const drive115UI = initDrive115({
     renderClearQueryButton();
     void searchSubtitles();
   },
-  async onFolder(result) {
-    pauseBatchMatch();
-    await savePersistentBatchState({ immediate: true });
-    return loadVideoSelectionResult(result, { cloud115: true });
-  },
+  onFolder: (result) => loadVideoSelectionResult(result, { cloud115: true }),
   getSubtitle() {
     if (!state.downloadUrl || !state.selectedId) return null;
     const params = new URL(state.downloadUrl, window.location.href).searchParams;
@@ -324,6 +337,8 @@ nodes.startBatchButton.addEventListener("click", () => {
   void startOrResumeBatchMatch();
 });
 
+nodes.restoreBatchButton.addEventListener("click", () => { void restorePreviousBatch(); });
+
 nodes.pauseBatchButton.addEventListener("click", () => {
   pauseBatchMatch();
 });
@@ -333,6 +348,7 @@ nodes.retryBatchButton.addEventListener("click", () => {
 });
 
 nodes.batchMode.addEventListener("change", renderBatchMatchState);
+nodes.batchSaveCount.addEventListener("change", scheduleBatchStateSave);
 nodes.batchIncludeExisting.addEventListener("change", renderBatchMatchState);
 nodes.openBatchReview.addEventListener("click", openBatchReview);
 nodes.closeBatchReview.addEventListener("click", closeBatchReview);
@@ -380,8 +396,10 @@ nodes.language.addEventListener("change", () => {
 nodes.missingOnlyToggle.addEventListener("change", () => {
   state.hideMatchedVideos = nodes.missingOnlyToggle.checked;
   localStorage.setItem("subtitle-finder-missing-only", state.hideMatchedVideos ? "true" : "false");
-  renderVideoFiles();
+  showVideoListPage(0);
 });
+nodes.videoListPrevious.addEventListener("click", () => showVideoListPage(state.videoListPage - 1));
+nodes.videoListNext.addEventListener("click", () => showVideoListPage(state.videoListPage + 1));
 
 // 1.12 绑定最近搜索清理
 nodes.clearRecentButton.addEventListener("click", () => {
@@ -395,6 +413,7 @@ restoreVideoFilter();
 restoreBatchSettings();
 syncConversionControl();
 const settingsReadyPromise = restoreAppSettings();
+const batchStateReadyPromise = restorePersistentBatchState();
 nodes.checkUpdatesButton.addEventListener("click", () => { void checkForUpdates(); });
 void settingsReadyPromise.then(() => checkForUpdates());
 
@@ -421,10 +440,8 @@ if (window.subtitleFinder && window.subtitleFinder.onSubtitleSyncEvent) {
     handleSubtitleSyncEvent(event || {});
   });
 }
-void restorePersistentBatchState();
-
 window.addEventListener("pagehide", () => {
-  void savePersistentBatchState({ immediate: true });
+  if (!state.batchSwitching) void savePersistentBatchState({ immediate: true });
 });
 
 async function checkForUpdates() {
@@ -432,11 +449,15 @@ async function checkForUpdates() {
   nodes.checkUpdatesButton.disabled = true;
   nodes.updateStatus.textContent = "正在检查更新…";
   try {
+    const healthResponse = await fetch(apiUrl("/api/health"), { cache: "no-store" });
+    const { version: currentVersion } = await healthResponse.json();
+    if (!healthResponse.ok || !currentVersion) throw new Error("无法读取当前版本");
+    nodes.appVersion.textContent = nodes.aboutVersion.textContent = ` · v${currentVersion}`;
     const response = await fetch(apiUrl("/api/update"), { cache: "no-store" });
     const release = await response.json();
     if (!response.ok) throw new Error(release.error);
     const platform = window.subtitleFinder?.platform;
-    const newer = release.version.localeCompare(nodes.appVersion.textContent, "en", { numeric: true }) > 0;
+    const newer = release.version.localeCompare(currentVersion, "en", { numeric: true }) > 0;
     const available = newer && (!platform || release.platforms.includes(platform));
     nodes.updateLink.hidden = !available;
     nodes.aboutUpdateLink.hidden = !available;
@@ -491,6 +512,7 @@ async function searchSubtitles(searchQuery) {
   setStatus("搜索中", "busy");
   nodes.resultSummary.textContent = `搜索 ${query}`;
   state.lastSearchQuery = query;
+  state.refreshResultSummary = null;
   state.showOtherSearchResults = false;
   nodes.showOtherSearchResults.hidden = true;
   state.results = [];
@@ -512,6 +534,7 @@ async function searchSubtitles(searchQuery) {
       throw new Error("该字幕源需要先从视频文件夹选择一个本地视频");
     }
     const videoInfo = activeVideo ? await inspectVideoForSearch(activeVideo) : {};
+    const videoDurationMs = getVideoDurationMs(cloudTarget || activeVideo, videoInfo);
     if (state.searchRunId !== searchRunId) {
       logger.info(`搜索字幕完成: ${query} 已被新搜索替换`);
       return;
@@ -534,6 +557,7 @@ async function searchSubtitles(searchQuery) {
       limit: 80,
       video: activeVideo,
       videoInfo,
+      videoDurationMs,
     });
     const data = await fetchSearchData(request, SEARCH_TIMEOUT_MS);
     if (state.searchRunId !== searchRunId) {
@@ -545,7 +569,7 @@ async function searchSubtitles(searchQuery) {
     state.results = data.results || [];
     addRecent(query);
     const filterEnabled = state.subtitleSaveFilter.enabled;
-    if (!filterEnabled || !state.results.length) {
+    if ((!filterEnabled && !videoDurationMs) || !state.results.length) {
       renderResults(state.results);
     } else {
       nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">正在校验字幕正文…</td></tr>`;
@@ -555,10 +579,11 @@ async function searchSubtitles(searchQuery) {
     setStatus(errorCount ? "部分完成" : "完成", errorCount ? "warn" : "ok");
     const cacheLabel = data.cached ? " · 缓存" : "";
     const errorLabel = errorCount ? ` · ${errorCount} 个源失败` : "";
-    const updateSummary = (count, excluded, progress = "", filtered = false) => {
+    const updateSummary = (count, excluded, progress = "", filtered = false, invalid = 0) => {
       const filterLabel = excluded ? ` · 关键词排除 ${excluded} 条` : "";
-      const countLabel = filtered ? `${count} 条命中保存特征` : `${count} 条结果`;
-      nodes.resultSummary.textContent = `${countLabel}${errorLabel}${filterLabel}${cacheLabel}${progress}`;
+      const countLabel = filtered ? `${count} 条命中保存特征` : `${count} 条可选`;
+      const invalidLabel = invalid ? ` · ${invalid} 条正文无效` : "";
+      nodes.resultSummary.textContent = `${countLabel}${invalidLabel}${errorLabel}${filterLabel}${cacheLabel}${progress}`;
     };
     const excludedByTitle = Number(data.excludedCount || 0);
     updateSummary(state.results.length, excludedByTitle);
@@ -568,10 +593,7 @@ async function searchSubtitles(searchQuery) {
     state.searchRankingController = controller;
     updateSummary(state.results.length, excludedByTitle, ` · 校验正文 0/${state.results.length}`);
     try {
-      const checks = await checkSubtitleCandidates(state.results, {
-        language,
-        videoDurationMs: Number(videoInfo.videoDurationMs || activeVideo?.videoDurationMs || 0),
-      }, controller, (done, total) => {
+      const checks = await checkSubtitleCandidates(state.results, { language, videoDurationMs }, controller, (done, total) => {
         updateSummary(state.results.length, excludedByTitle, ` · 校验正文 ${done}/${total}`);
       });
       if (controller.signal.aborted || state.searchRunId !== searchRunId) return;
@@ -580,14 +602,22 @@ async function searchSubtitles(searchQuery) {
         state.selectedDownloadIds.delete(result.id);
         return false;
       });
-      state.results = visible.sort(compareCheckedSubtitles).map(({ result, data }) => ({
-        ...result,
-        recommendationLabel: data?.valid ? subtitleRecommendationLabel(data) : "",
-        saveRestriction: data?.saveRestriction || (filterEnabled && !data?.valid ? "未能核对保存特征" : ""),
-      }));
+      state.results = visible.sort((left, right) => compareCheckedSubtitles(left, right, videoDurationMs)).map(({ result, data, invalidContent, validationError }) => {
+        if (invalidContent) state.selectedDownloadIds.delete(result.id);
+        return {
+          ...result,
+          recommendationLabel: data?.valid ? subtitleRecommendationLabel(data, videoDurationMs) : "",
+          invalidContent,
+          validationError,
+          saveRestriction: data?.saveRestriction || (filterEnabled && !data?.valid ? "未能核对保存特征" : ""),
+        };
+      });
       renderResults(state.results);
       setActiveRow(state.selectedId);
-      updateSummary(state.results.filter(canSelectSearchResult).length, excludedByTitle + checks.length - visible.length, "", filterEnabled);
+      state.refreshResultSummary = () => updateSummary(state.results.filter(canSelectSearchResult).length,
+        excludedByTitle + checks.length - visible.length, "", filterEnabled,
+        state.results.filter((item) => item.invalidContent).length);
+      state.refreshResultSummary();
     } finally {
       if (state.searchRankingController === controller) state.searchRankingController = null;
     }
@@ -609,7 +639,7 @@ async function searchSubtitles(searchQuery) {
   }
 }
 
-function buildSearchRequest({ query, source, language, limit, video = null, videoInfo = {} }) {
+function buildSearchRequest({ query, source, language, limit, refresh = false, video = null, videoInfo = {}, videoDurationMs = getVideoDurationMs(video, videoInfo) }) {
   /*
    * ================================================================================
    * 步骤2.5：生成字幕搜索请求
@@ -627,6 +657,7 @@ function buildSearchRequest({ query, source, language, limit, video = null, vide
     lang: String(language || "zh-CN"),
     limit: String(limit || 80),
   });
+  if (refresh) params.set("refresh", "1");
 
   // 2.5.2 附加视频来源与匹配参数
   if (video) {
@@ -636,13 +667,11 @@ function buildSearchRequest({ query, source, language, limit, video = null, vide
     params.set("releaseName", video.name || query || "video.mkv");
     if (video.remote115) params.set("remote115", "1");
     if (video.catalogCode) params.set("catalogCode", video.catalogCode);
-    if (Number(videoInfo.videoDurationMs || video.videoDurationMs) > 0) {
-      params.set("videoDurationMs", String(Number(videoInfo.videoDurationMs || video.videoDurationMs)));
-    }
     for (const alias of Array.isArray(video.searchAliases) ? video.searchAliases.slice(0, 8) : []) {
       params.append("alias", alias);
     }
   }
+  if (videoDurationMs > 0) params.set("videoDurationMs", String(videoDurationMs));
   const request = {
     url: apiUrl(`/api/search?${params.toString()}`),
     headers: state.assrtToken ? { "x-assrt-token": state.assrtToken } : {},
@@ -756,7 +785,7 @@ function renderResults(results) {
    * 2) 给每一行绑定预览动作
    */
   logger.info("开始渲染搜索结果...");
-  const matches = results.filter(canSelectSearchResult);
+  const matches = results.filter((item) => !state.subtitleSaveFilter.enabled || !item.saveRestriction);
   const otherCount = results.length - matches.length;
   const expanded = state.showOtherSearchResults && otherCount > 0;
   nodes.showOtherSearchResults.hidden = otherCount === 0;
@@ -778,7 +807,7 @@ function renderResults(results) {
   nodes.resultsBody.innerHTML = displayed
     .map((item) => {
       const details = [item.size, item.duration, item.extra].filter(Boolean).join(" · ");
-      const meta = [details || item.fileName, item.recommendationLabel, item.saveRestriction].filter(Boolean).join(" · ");
+      const meta = [details || item.fileName, item.recommendationLabel, item.validationError || item.saveRestriction].filter(Boolean).join(" · ");
       const selectable = canSelectSearchResult(item);
       const selection = selectable ? (state.selectedDownloadIds.has(item.id) ? "checked" : "") : "disabled";
       return `
@@ -840,7 +869,20 @@ function renderResults(results) {
 }
 
 function canSelectSearchResult(result) {
-  return !state.subtitleSaveFilter.enabled || !result.saveRestriction;
+  return !result.invalidContent && (!state.subtitleSaveFilter.enabled || !result.saveRestriction);
+}
+
+function updatePreviewCandidate(id, data) {
+  const result = state.results.find((item) => item.id === id);
+  if (!result || (!data.invalidContent && !data.validation?.valid)) return;
+  if (!result.invalidContent && !result.validationError && !data.invalidContent) return;
+  result.invalidContent = data.invalidContent === true;
+  result.validationError = result.invalidContent ? data.detail : "";
+  if (result.invalidContent) state.selectedDownloadIds.delete(id);
+  else result.saveRestriction = data.saveRestriction || "";
+  renderResults(state.results);
+  setActiveRow(id);
+  state.refreshResultSummary?.();
 }
 
 function renderSourceStats(stats) {
@@ -981,7 +1023,8 @@ async function openSettingsDialog() {
   nodes.settingsMessage.textContent = "";
   await settingsReadyPromise;
   nodes.matchVideoName.checked = state.matchVideoName;
-  nodes.scanExclusionRules.value = state.scanExclusionRules.join("\n");
+  nodes.scanVideoExclusionRules.value = state.scanExclusions.scanVideoExclusionRules.join("\n");
+  nodes.scanFolderExclusionRules.value = state.scanExclusions.scanFolderExclusionRules.join("\n");
   nodes.subtitleExclusionKeywords.value = state.subtitleExclusionKeywords;
   const filter = state.subtitleSaveFilter;
   nodes.subtitleSaveFilterEnabled.checked = Boolean(filter.enabled);
@@ -1050,7 +1093,10 @@ async function saveSettings() {
   nodes.settingsMessage.dataset.tone = "busy";
   try {
     // 6.4.2 校验并保存通用设置
-    const scanExclusionRules = parseScanExclusionRules(nodes.scanExclusionRules.value);
+    const scanExclusions = parseScanExclusionSettings({
+      scanVideoExclusionRules: nodes.scanVideoExclusionRules.value,
+      scanFolderExclusionRules: nodes.scanFolderExclusionRules.value,
+    });
     parseCustomConversionDictionary(nodes.customDictionary.value);
     const response = await fetch(apiUrl("/api/settings"), {
       method: "PUT",
@@ -1058,7 +1104,7 @@ async function saveSettings() {
       body: JSON.stringify({
         settings: {
           matchVideoName: nodes.matchVideoName.checked,
-          scanExclusionRules,
+          ...scanExclusions,
           subtitleExclusionKeywords: nodes.subtitleExclusionKeywords.value,
           subtitleSaveFilter: {
             enabled: nodes.subtitleSaveFilterEnabled.checked,
@@ -1073,7 +1119,7 @@ async function saveSettings() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "设置保存失败");
     state.matchVideoName = data.settings?.matchVideoName !== false;
-    state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
+    state.scanExclusions = parseScanExclusionSettings(data.settings);
     state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
     const nextFilter = data.settings?.subtitleSaveFilter || {};
     const filterChanged = (state.subtitleSaveFilter.enabled || nextFilter.enabled)
@@ -1226,6 +1272,7 @@ async function previewSubtitle(id, options = {}) {
     const response = await fetch(apiUrl(`/api/preview?${params.toString()}`), { signal: controller.signal });
     const data = await response.json();
     if (state.previewController !== controller) return;
+    updatePreviewCandidate(id, data);
     if (data.excluded) {
       state.previewText = "";
       nodes.previewText.textContent = data.detail;
@@ -1894,29 +1941,9 @@ async function scanVideoFolder() {
     return;
   }
 
-  // 7.2 停止旧任务后选择目录
-  pauseBatchMatch();
   await settingsReadyPromise;
-  const result = await window.subtitleFinder.selectVideoDir({ excludeRules: state.scanExclusionRules });
-  if (!(result && result.selected)) {
-    setStatus("已取消", "warn");
-    logger.info("扫描视频文件夹完成: cancel");
-    return;
-  }
-
-  // 7.3 只有真正选择新目录后才阻止旧状态异步恢复
-  state.batchStateTouched = true;
-  state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
-  state.activeVideoPath = "";
-  state.singleVideoMode = false;
-  state.videoDirectoryLabel = String(result.label || result.directory || "");
-  resetBatchMatch();
-  state.videoDirectoryId = String(result.directory || result.label || "");
-  renderVideoFiles();
-  renderBatchMatchState();
-  await savePersistentBatchState({ immediate: true });
-  setStatus(state.videoFiles.length ? "已扫描" : "无视频", state.videoFiles.length ? "ok" : "warn");
-  logger.info("扫描视频文件夹完成", state.videoFiles.length);
+  const result = await window.subtitleFinder.selectVideoDir(state.scanExclusions);
+  await loadVideoSelectionResult(result);
 }
 
 async function selectSingleVideo() {
@@ -1936,7 +1963,6 @@ async function selectSingleVideo() {
     logger.info("选择单个视频完成: unsupported");
     return;
   }
-  pauseBatchMatch();
   const result = await window.subtitleFinder.selectVideoFile();
   await loadVideoSelectionResult(result, { singleVideo: true, startSearch: true });
 
@@ -1953,8 +1979,6 @@ async function loadVideoSelectionResult(result, options = {}) {
    * 2) 单视频模式不创建文件夹批量任务
    */
   logger.info("开始载入视频选择结果...");
-  if (state.batchSaving) return false;
-
   // 7.3.1 处理取消和平台错误
   if (!(result && result.selected)) {
     if (result?.error) {
@@ -1967,30 +1991,40 @@ async function loadVideoSelectionResult(result, options = {}) {
     return false;
   }
 
-  // 7.3.2 写入视频状态并选中目标
-  closeBatchReview();
-  drive115UI.clearTarget();
-  state.batchStateTouched = true;
-  state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
-  state.videoDirectoryLabel = String(result.label || result.directory || "");
-  state.videoDirectoryId = options.singleVideo || options.cloud115 ? "" : String(result.directory || result.label || "");
-  state.singleVideoMode = Boolean(options.singleVideo);
-  resetBatchMatch();
-  const selectedVideo = result.videoPath
-    ? state.videoFiles.find((item) => item.path === result.videoPath) || state.videoFiles[0]
-    : options.singleVideo ? state.videoFiles[0] : null;
-  state.activeVideoPath = selectedVideo?.path || "";
-  if (selectedVideo) {
-    nodes.query.value = selectedVideo.query || selectedVideo.name || "";
-    renderClearQueryButton();
-  }
-  renderVideoFiles();
-  renderSubtitleSyncState();
-  renderBatchMatchState();
-  if (!options.singleVideo && !options.cloud115) await savePersistentBatchState({ immediate: true });
+  let selectedVideo;
+  const loaded = await switchBatch(async () => {
+    closeBatchReview();
+    drive115UI.clearTarget();
+    state.batchStateTouched = true;
+    const directoryId = options.singleVideo || options.cloud115 ? "" : String(result.directory || result.label || "");
+    const sameDirectory = Boolean(directoryId && directoryId === state.videoDirectoryId);
+    state.videoFiles = normalizeScannedVideoFiles(Array.isArray(result.files) ? result.files : []);
+    state.videoDirectoryLabel = String(result.label || result.directory || "");
+    state.videoDirectoryId = directoryId;
+    state.singleVideoMode = Boolean(options.singleVideo);
+    if (sameDirectory) {
+      const paths = new Set(state.videoFiles.map((video) => video.path));
+      state.batchTasks = state.batchTasks.filter((task) => paths.has(task.videoPath));
+    } else {
+      resetBatchMatch();
+    }
+    selectedVideo = result.videoPath
+      ? state.videoFiles.find((item) => item.path === result.videoPath) || state.videoFiles[0]
+      : options.singleVideo ? state.videoFiles[0] : null;
+    state.activeVideoPath = selectedVideo?.path || "";
+    if (selectedVideo) {
+      nodes.query.value = selectedVideo.query || selectedVideo.name || "";
+      renderClearQueryButton();
+    }
+    showVideoListPage(0);
+    renderSubtitleSyncState();
+    await savePersistentBatchState({ immediate: true, required: true });
+  });
+  if (!loaded) return false;
   setStatus(state.videoFiles.length ? "已载入" : "无视频", state.videoFiles.length ? "ok" : "warn");
   if (options.cloud115) {
-    nodes.resultSummary.textContent = result.truncated ? "115 扫描已达到 500 个视频，请分文件夹匹配" : `${result.label} · ${state.videoFiles.length} 个视频`;
+    const next = result.nextStart ? ` · 可继续扫描第 ${result.nextStart} 部起` : "";
+    nodes.resultSummary.textContent = `${result.label} · ${state.videoFiles.length} 个视频${next}`;
   }
 
   // 7.3.3 单视频入口自动开始搜索
@@ -2018,7 +2052,8 @@ async function consumeDesktopLaunchTarget() {
 
   // 7.4.2 读取并载入目标
   try {
-    const result = await window.subtitleFinder.consumeLaunchTarget();
+    await settingsReadyPromise;
+    const result = await window.subtitleFinder.consumeLaunchTarget(state.scanExclusions);
     if (!(result && result.selected)) {
       logger.info("处理 Windows 右键启动目标完成: empty");
       return;
@@ -2032,6 +2067,12 @@ async function consumeDesktopLaunchTarget() {
     setStatus("载入失败", "error");
     logger.error("处理 Windows 右键启动目标失败", error);
   }
+}
+
+function showVideoListPage(page) {
+  state.videoListPage = page;
+  renderVideoFiles();
+  nodes.videoList.scrollTop = 0;
 }
 
 function renderVideoFiles() {
@@ -2048,6 +2089,7 @@ function renderVideoFiles() {
 
   // 8.1 更新扫描摘要
   renderVideoScanSummary();
+  nodes.videoListPagination.hidden = true;
 
   // 8.2 处理空列表
   if (!state.videoFiles.length) {
@@ -2057,12 +2099,13 @@ function renderVideoFiles() {
   }
 
   // 8.3 按筛选条件生成视频按钮
+  const tasksByVideoPath = new Map(state.batchTasks.map((task) => [task.videoPath, task]));
   const visibleFiles = state.videoFiles
     .map((item, index) => ({ item, index }))
     .filter(({ item }) =>
       !state.hideMatchedVideos ||
       !item.hasSubtitle ||
-      state.batchTasks.some((task) => task.videoPath === item.path)
+      tasksByVideoPath.has(item.path)
     );
   if (!visibleFiles.length) {
     nodes.videoList.innerHTML = `<span class="muted">全部视频已有字幕</span>`;
@@ -2070,11 +2113,18 @@ function renderVideoFiles() {
     return;
   }
 
+  const pageCount = state.videoFiles[0].remote115 ? Math.ceil(visibleFiles.length / VIDEO_LIST_PAGE_SIZE) : 1;
+  state.videoListPage = Math.min(Math.max(0, state.videoListPage), pageCount - 1);
+  nodes.videoListPagination.hidden = pageCount === 1;
+  nodes.videoListPage.textContent = `第 ${state.videoListPage + 1} / ${pageCount} 页`;
+  nodes.videoListPrevious.disabled = state.videoListPage === 0;
+  nodes.videoListNext.disabled = state.videoListPage === pageCount - 1;
+  const offset = state.videoListPage * VIDEO_LIST_PAGE_SIZE;
   nodes.videoList.innerHTML = visibleFiles
-    .slice(0, 80)
+    .slice(offset, offset + VIDEO_LIST_PAGE_SIZE)
     .map(({ item, index }) => {
       const existingNames = Array.isArray(item.existingSubtitles) ? item.existingSubtitles.join("\n") : "";
-      const task = state.batchTasks.find((candidate) => candidate.videoPath === item.path);
+      const task = tasksByVideoPath.get(item.path);
       const title = [item.path || item.name || "", existingNames, task?.message].filter(Boolean).join("\n");
       const statusLabel = getVideoStatusLabel(item, task);
       const statusTone = task?.status === "failed" || task?.status === "no-result"
@@ -2291,15 +2341,14 @@ async function restoreAppSettings() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "设置读取失败");
     state.matchVideoName = data.settings?.matchVideoName !== false;
-    state.scanExclusionRules = parseScanExclusionRules(data.settings?.scanExclusionRules || []);
+    state.scanExclusions = parseScanExclusionSettings(data.settings);
     state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
     state.subtitleSaveFilter = data.settings?.subtitleSaveFilter || {};
     state.customDictionary = String(data.settings?.customDictionary || "");
     applyChinesePreferences(data.settings);
     drive115UI.render();
-    logger.info("恢复通用设置完成", state.scanExclusionRules.length);
+    logger.info("恢复通用设置完成");
   } catch (error) {
-    state.scanExclusionRules = [];
     state.customDictionary = "";
     logger.warn("恢复通用设置失败", error);
   }
@@ -2377,21 +2426,9 @@ async function restorePersistentBatchState() {
     const response = await fetch(apiUrl("/api/state/batch"), { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "任务恢复失败");
-    const saved = data.state;
-    if (!state.batchStateTouched && saved && Array.isArray(saved.videoFiles) && saved.videoFiles.length) {
-      if (["zh-CN", "zh-TW", "en", "ja"].includes(saved.language)) nodes.language.value = saved.language;
-      syncConversionControl(state.autoConvertChinese);
-      state.videoDirectoryId = String(saved.videoDirectoryId || "");
-      state.videoDirectoryLabel = String(saved.videoDirectoryLabel || "");
-      state.videoFiles = normalizeScannedVideoFiles(saved.videoFiles);
-      const videoPaths = new Set(state.videoFiles.map((item) => item.path));
-      state.batchTasks = (Array.isArray(saved.batchTasks) ? saved.batchTasks : []).filter((task) => videoPaths.has(task.videoPath));
-      state.batchStatus = ["idle", "paused", "completed"].includes(saved.batchStatus) ? saved.batchStatus : "paused";
-      state.namingPreset = saved.namingPreset || state.namingPreset;
-      state.batchConcurrency = clampNumber(saved.batchConcurrency, 1, 3, state.batchConcurrency);
-      nodes.namingPreset.value = state.namingPreset;
-      nodes.batchConcurrency.value = String(state.batchConcurrency);
-    }
+    state.previousBatch = data.previousBatch || null;
+    state.storedLocalBatch = Boolean(data.state?.videoFiles?.length);
+    if (!state.batchStateTouched && state.storedLocalBatch) applyPersistedBatchState(data.state);
 
     // 11.5.3 标记恢复完成后渲染，后续变化才允许落盘
     state.batchStateLoaded = true;
@@ -2403,6 +2440,66 @@ async function restorePersistentBatchState() {
     state.batchStateLoaded = true;
     logger.warn("恢复批量任务状态失败", error);
   }
+}
+
+function applyPersistedBatchState(saved) {
+  closeBatchReview();
+  drive115UI.clearTarget();
+  resetBatchMatch();
+  if (["zh-CN", "zh-TW", "en", "ja"].includes(saved.language)) nodes.language.value = saved.language;
+  syncConversionControl(state.autoConvertChinese);
+  state.videoDirectoryId = String(saved.videoDirectoryId || "");
+  state.videoDirectoryLabel = String(saved.videoDirectoryLabel || "");
+  state.activeVideoPath = "";
+  state.singleVideoMode = false;
+  state.videoFiles = normalizeScannedVideoFiles(saved.videoFiles);
+  const videoPaths = new Set(state.videoFiles.map((item) => item.path));
+  state.batchTasks = (Array.isArray(saved.batchTasks) ? saved.batchTasks : []).filter((task) => videoPaths.has(task.videoPath));
+  state.batchStatus = ["idle", "paused", "completed"].includes(saved.batchStatus) ? saved.batchStatus : "paused";
+  state.namingPreset = saved.namingPreset || state.namingPreset;
+  state.batchConcurrency = clampNumber(saved.batchConcurrency, 1, 3, state.batchConcurrency);
+  nodes.namingPreset.value = state.namingPreset;
+  nodes.batchConcurrency.value = String(state.batchConcurrency);
+  nodes.batchSaveCount.value = String(saved.batchSaveCount || 1);
+}
+
+async function switchBatch(action) {
+  if (state.batchSwitching || state.batchSaving) return false;
+  state.batchSwitching = true;
+  try {
+    await batchStateReadyPromise;
+    pauseBatchMatch();
+    await state.batchRunPromise;
+    await savePersistentBatchState({ immediate: true, required: true });
+    await action();
+    return true;
+  } catch (error) {
+    setStatus("批次切换失败", "error");
+    nodes.resultSummary.textContent = String(error?.message || error);
+    logger.warn("批次切换失败", error);
+    return false;
+  } finally {
+    state.batchSwitching = false;
+    renderBatchMatchState();
+  }
+}
+
+async function restorePreviousBatch() {
+  const returned = await switchBatch(async () => {
+    const response = await fetch(apiUrl("/api/state/batch"), {
+      method: state.videoDirectoryId || !state.storedLocalBatch ? "POST" : "GET",
+      cache: "no-store",
+    });
+    const data = await response.json();
+    if (!response.ok || !data.state?.videoFiles?.length) throw new Error(data.detail || data.error || "没有可恢复的批次");
+    state.previousBatch = data.previousBatch || null;
+    state.storedLocalBatch = true;
+    state.batchStateTouched = true;
+    applyPersistedBatchState(data.state);
+    showVideoListPage(0);
+    renderSubtitleSyncState();
+  });
+  if (returned) setStatus("已恢复批次", "ok");
 }
 
 async function waitForLocalService() {
@@ -2443,19 +2540,13 @@ function scheduleBatchStateSave() {
    * 1) 合并搜索进度产生的高频更新
    * 2) 恢复完成前不写空状态覆盖旧任务
    */
-  logger.info("开始安排批量状态保存...");
-
   // 11.7.1 只在恢复完成且有目录身份时安排写入
-  if (!state.batchStateLoaded || !state.videoDirectoryId) {
-    logger.info("安排批量状态保存完成: skipped");
-    return;
-  }
+  if (!state.batchStateLoaded || !state.videoDirectoryId || state.batchSwitching) return;
   clearTimeout(state.batchStateSaveTimer);
   state.batchStateSaveTimer = setTimeout(() => {
     state.batchStateSaveTimer = null;
     void savePersistentBatchState({ immediate: true });
   }, 180);
-  logger.info("安排批量状态保存完成");
 }
 
 async function savePersistentBatchState(options = {}) {
@@ -2491,12 +2582,14 @@ async function savePersistentBatchState(options = {}) {
       message: task.status === "ready" ? "等待重新搜索候选" : task.message,
       includeExisting: task.includeExisting,
       savedPath: task.savedPath,
+      automaticSavedHashes: task.automaticSavedHashes,
       retryCount: task.retryCount || 0,
       updatedAt: task.updatedAt || Date.now(),
     })),
     batchStatus: state.batchTasks.some((task) => task.status === "ready") ? "paused" : state.batchStatus,
     namingPreset: state.namingPreset,
     batchConcurrency: state.batchConcurrency,
+    batchSaveCount: Number(nodes.batchSaveCount.value),
     language: nodes.language.value,
   };
 
@@ -2510,6 +2603,9 @@ async function savePersistentBatchState(options = {}) {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || "任务保存失败");
+    state.storedLocalBatch = Boolean(persistedState.videoFiles.length);
+    state.previousBatch = data.previousBatch || null;
+    renderBatchRestoreButton();
   });
   state.batchStateSavePromise = request;
   try {
@@ -2517,6 +2613,7 @@ async function savePersistentBatchState(options = {}) {
     logger.info("保存批量任务状态完成", persistedState.batchTasks.length);
   } catch (error) {
     logger.warn("保存批量任务状态失败", error);
+    if (options.required) throw error;
   } finally {
     if (state.batchStateSavePromise === request) state.batchStateSavePromise = null;
   }
@@ -2549,6 +2646,10 @@ async function inspectVideoForSearch(video) {
   updateVideoInspectionState(video, result || {});
   logger.info("分析本地视频完成", result?.ok ? "ok" : "failed");
   return result || {};
+}
+
+function getVideoDurationMs(video, inspection = {}) {
+  return Number(inspection.videoDurationMs || video?.videoDurationMs || video?.durationMs || 0);
 }
 
 function updateVideoInspectionState(video, inspection) {
@@ -2592,7 +2693,7 @@ async function startOrResumeBatchMatch() {
   state.batchStateTouched = true;
 
   // 13.1 校验原生分析和保存能力
-  if (state.batchStatus === "running" || state.batchSaving) {
+  if (state.batchStatus === "running" || state.batchSaving || state.batchSwitching || state.batchRunPromise) {
     logger.info("启动或继续批量匹配完成: already running");
     return;
   }
@@ -2608,6 +2709,7 @@ async function startOrResumeBatchMatch() {
   }
 
   const mode = nodes.batchMode.value;
+  const saveCount = Number(nodes.batchSaveCount.value);
   // 13.2 首次运行或全部完成后重建缺字幕任务
   if (!state.batchTasks.length || state.batchStatus === "idle" || state.batchStatus === "completed") {
     const includeExisting = mode === "review" && nodes.batchIncludeExisting.checked;
@@ -2639,7 +2741,13 @@ async function startOrResumeBatchMatch() {
   state.batchRunId = runId;
   renderBatchMatchState();
   const workerCount = Math.min(state.batchConcurrency, pending.length);
-  await Promise.all(Array.from({ length: workerCount }, () => runBatchWorker(runId, mode)));
+  const run = Promise.all(Array.from({ length: workerCount }, () => runBatchWorker(runId, mode, saveCount)));
+  state.batchRunPromise = run;
+  try {
+    await run;
+  } finally {
+    if (state.batchRunPromise === run) state.batchRunPromise = null;
+  }
 
   // 13.4 所有工作线程结束后更新状态
   if (state.batchRunId === runId && state.batchStatus === "running") {
@@ -2651,7 +2759,7 @@ async function startOrResumeBatchMatch() {
   logger.info("启动或继续批量匹配完成");
 }
 
-async function runBatchWorker(runId, mode) {
+async function runBatchWorker(runId, mode, saveCount) {
   // 13.5 每个工作线程循环领取一个待处理任务
   while (state.batchStatus === "running" && state.batchRunId === runId) {
     const task = state.batchTasks.find((candidate) => candidate.status === "pending");
@@ -2661,11 +2769,11 @@ async function runBatchWorker(runId, mode) {
     task.updatedAt = Date.now();
     renderBatchMatchState();
     renderVideoFiles();
-    await processBatchTask(task, runId, mode);
+    await processBatchTask(task, runId, mode, saveCount);
   }
 }
 
-async function processBatchTask(task, runId, mode) {
+async function processBatchTask(task, runId, mode, saveCount) {
   /*
    * ================================================================================
    * 步骤14：处理单个视频任务
@@ -2688,6 +2796,7 @@ async function processBatchTask(task, runId, mode) {
   }
 
   let controller;
+  const savedHashes = task.automaticSavedHashes || [];
   try {
     task.phase = "inspect";
     const inspection = video.remote115 ? {} : await inspectVideoForSearch(video);
@@ -2713,28 +2822,32 @@ async function processBatchTask(task, runId, mode) {
     const conversion = automaticConversionFor(language);
     task.language = language;
     task.conversion = conversion;
-    task.videoDurationMs = Number(inspection.videoDurationMs || video.videoDurationMs || 0);
+    task.videoDurationMs = getVideoDurationMs(video, inspection);
     const request = buildSearchRequest({
       query: video.query || video.name,
       source: "all",
       language,
       limit: 100,
+      refresh: task.retryCount > 0,
       video,
       videoInfo: inspection,
     });
     const data = await fetchSearchData(request, BATCH_SEARCH_TIMEOUT_MS, controller);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
-    const { candidates, incompleteCount, excludedCount, restrictedCount } = await validateBatchCandidates(data.results || [], task, controller, mode);
+    const { candidates, incompleteCount, excludedCount, restrictedCount, readFailureCount } = await validateBatchCandidates(data.results || [], task, controller, mode);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
     const keywordCount = Number(data.excludedCount || 0) + excludedCount;
     const excludedLabel = keywordCount ? ` · 关键词排除 ${keywordCount} 份` : "";
     const restrictedLabel = restrictedCount ? ` · ${restrictedCount} 份未命中保存特征` : "";
-    if (!candidates.length) {
+    const sourceFailureCount = Array.isArray(data.errors) ? data.errors.length : 0;
+    const failureLabel = [
+      sourceFailureCount ? `${sourceFailureCount} 个来源搜索失败` : "",
+      readFailureCount ? `${readFailureCount} 份候选暂未读取` : "",
+    ].filter(Boolean).join(" · ");
+    if (!candidates.length && !savedHashes.length) {
       task.status = "no-result";
-      const sourceFailures = Array.isArray(data.errors) ? data.errors.length : 0;
-      const failureLabel = sourceFailures ? ` · ${sourceFailures} 个来源失败` : "";
       task.message = (incompleteCount ? `没有合格字幕 · 排除 ${incompleteCount} 份明显残缺字幕`
-        : keywordCount || restrictedCount ? "没有符合条件的字幕" : (data.results || []).length ? "候选字幕均未通过校验" : "本轮未找到可用字幕") + excludedLabel + restrictedLabel + failureLabel;
+        : keywordCount || restrictedCount ? "没有符合条件的字幕" : (data.results || []).length ? "候选字幕均未通过校验" : "本轮未找到可用字幕") + excludedLabel + restrictedLabel + (failureLabel ? ` · ${failureLabel}` : "");
       task.updatedAt = Date.now();
       renderBatchMatchState();
       renderVideoFiles();
@@ -2742,7 +2855,7 @@ async function processBatchTask(task, runId, mode) {
       return;
     }
 
-    if (mode === "review") {
+    if (mode === "review" && candidates.length) {
       task.status = "ready";
       task.request = request;
       task.candidates = candidates;
@@ -2754,26 +2867,46 @@ async function processBatchTask(task, runId, mode) {
       return;
     }
 
-    // 14.3 保存最高质量结果
-    const selected = candidates[0].result;
-    task.message = `正在保存 ${selected.sourceLabel || selected.source}`;
+    // 14.3 按推荐顺序保存本轮还缺的份数
+    const toSave = mode === "single" ? candidates.slice(0, Math.max(0, saveCount - savedHashes.length)) : [];
+    let version = nextBatchSubtitleVersion(video);
     task.phase = "save";
-    task.result = selected;
-    renderBatchMatchState();
-    const saved = await saveBatchSubtitle(video, selected, language, 1, conversion);
-    if (!(saved && saved.saved)) throw new Error(saved?.error || "保存字幕失败");
-    task.status = "saved";
-    task.savedPath = saved.filePath || saved.fileName || "";
-    task.message = "已匹配";
+    for (const [index, { result, contentHash }] of toSave.entries()) {
+      if (state.batchRunId !== runId || state.batchStatus !== "running") {
+        task.status = "pending";
+        task.message = `已暂停 · 已保存 ${savedHashes.length} 份`;
+        task.updatedAt = Date.now();
+        renderBatchMatchState();
+        renderVideoFiles();
+        return;
+      }
+      task.message = `正在保存第 ${savedHashes.length + 1} 份`;
+      renderBatchMatchState();
+      const saved = await saveBatchSubtitle(video, result, language, version++, conversion);
+      if (!saved?.saved) throw new Error(saved?.error || "保存字幕失败");
+      savedHashes.push(contentHash);
+      task.automaticSavedHashes = savedHashes;
+      task.savedPath = saved.filePath || saved.fileName || "";
+      task.updatedAt = Date.now();
+      recordBatchSubtitle(video, saved);
+      renderBatchMatchState();
+      renderVideoFiles();
+      if (state.videoDirectoryId && index + 1 < toSave.length) await savePersistentBatchState({ immediate: true });
+    }
+    const shortage = mode === "single" && savedHashes.length < saveCount;
+    const retryableShortage = shortage && Boolean(failureLabel);
+    task.status = retryableShortage ? "failed" : "saved";
+    task.message = `已保存 ${savedHashes.length} 份`;
+    if (shortage) task.message += retryableShortage ? ` · ${failureLabel}，可重试` : " · 其余无合格字幕";
     task.updatedAt = Date.now();
-    recordBatchSubtitle(video, saved);
     renderBatchMatchState();
     renderVideoFiles();
-    logger.info("处理单个视频任务完成: saved");
+    logger.info("处理单个视频任务完成", task.status);
   } catch (error) {
     if (task.phase === "save") {
       task.status = "failed";
-      task.message = String(error?.message || error);
+      const savedLabel = savedHashes.length ? `已保存 ${savedHashes.length} 份 · ` : "";
+      task.message = savedLabel + String(error?.message || error);
       task.retryCount = Number(task.retryCount || 0) + 1;
       task.updatedAt = Date.now();
       renderBatchMatchState();
@@ -2805,9 +2938,9 @@ async function checkSubtitleCandidates(results, options, controller, onProgress)
   const worker = async () => {
     while (!controller.signal.aborted && next < checks.length) {
       const check = checks[next++];
-      const params = new URLSearchParams({ id: check.result.id, lang: options.language });
+      const params = new URLSearchParams({ id: check.result.id, lang: options.language,
+        videoDurationMs: String(options.videoDurationMs || 0) });
       if (options.conversion) params.set("convert", options.conversion);
-      if (options.videoDurationMs > 0) params.set("videoDurationMs", String(options.videoDurationMs));
       try {
         const response = await fetchWithController(apiUrl(`/api/validate?${params.toString()}`), {
           timeoutMs: PREVIEW_TIMEOUT_MS,
@@ -2815,9 +2948,14 @@ async function checkSubtitleCandidates(results, options, controller, onProgress)
         });
         const data = await response.json();
         if ((response.ok && data.valid) || data.excluded) check.data = data;
-        else logger.warn("字幕候选未通过校验", check.result.title, data.detail || data.error);
+        else {
+          check.invalidContent = data.invalidContent === true;
+          check.validationError = data.detail || data.error;
+          logger.warn("字幕候选未通过校验", check.result.title, check.validationError);
+        }
       } catch (error) {
         if (controller.signal.aborted) return;
+        check.validationError = "暂未读取字幕，可点击查看重试";
         logger.warn("校验字幕候选失败", check.result.title, error);
       }
       completed += 1;
@@ -2836,18 +2974,29 @@ function canRecommendSubtitle(data) {
   return Boolean(data?.valid && !data.batchIssue && !data.saveRestriction && data.validation?.language?.match !== false);
 }
 
-function compareCheckedSubtitles(left, right) {
+function subtitleDurationDelta(data, videoDurationMs) {
+  const subtitleDurationMs = data?.validation?.durationSeconds * 1000;
+  if (!(videoDurationMs > 0) || !(subtitleDurationMs > 0)) return Infinity;
+  return Math.abs(subtitleDurationMs - videoDurationMs);
+}
+
+function compareCheckedSubtitles(left, right, videoDurationMs) {
   const leftData = canRecommendSubtitle(left.data) ? left.data : null;
   const rightData = canRecommendSubtitle(right.data) ? right.data : null;
   return Number(Boolean(rightData)) - Number(Boolean(leftData))
+    || subtitleDurationDelta(leftData, videoDurationMs) - subtitleDurationDelta(rightData, videoDurationMs)
     || candidateIdentityRank(right.result) - candidateIdentityRank(left.result)
     || (rightData?.recommendationRank || 0) - (leftData?.recommendationRank || 0)
     || (rightData?.openingDescriptionCount || 0) - (leftData?.openingDescriptionCount || 0)
     || (rightData?.descriptionCount || 0) - (leftData?.descriptionCount || 0);
 }
 
-function subtitleRecommendationLabel(data) {
+function subtitleRecommendationLabel(data, videoDurationMs) {
+  const delta = subtitleDurationDelta(data, videoDurationMs);
+  const durationLabel = Number.isFinite(delta)
+    ? `字幕结束 ${formatMediaDuration(data.validation.durationSeconds * 1000)} · 相差 ${delta === 0 ? "0 秒" : formatMediaDuration(delta) || "不到 1 秒"}` : "";
   return [
+    durationLabel,
     data.recommendationRank >= 2 ? "色花/98堂标记" : "",
     data.descriptionCount ? `括号说明 ${data.descriptionCount} 处` : "",
   ].filter(Boolean).join(" · ");
@@ -2863,17 +3012,18 @@ async function validateBatchCandidates(results, task, controller, mode) {
   const incompleteCount = checks.filter(({ data }) => data?.batchIssue).length;
   const excludedCount = checks.filter(({ data }) => data?.excluded).length;
   const restrictedCount = checks.filter(({ data }) => data?.saveRestriction).length;
-  const content = new Set();
+  const readFailureCount = checks.filter(({ data, invalidContent }) => !data && !invalidContent).length;
+  const content = new Set(task.automaticSavedHashes || []);
   const candidates = [];
-  for (const { result, data } of checks.sort((left, right) => compareCheckedSubtitles(left, right)
+  for (const { result, data } of checks.sort((left, right) => compareCheckedSubtitles(left, right, task.videoDurationMs)
     || Number(right.result.qualityScore || 0) - Number(left.result.qualityScore || 0))) {
-    if (!data?.valid || data.batchIssue || data.saveRestriction || (mode === "single" && !canRecommendSubtitle(data))) continue;
+    if (!data?.valid || data.batchIssue || data.saveRestriction || (mode === "single" && (!data.contentHash || !canRecommendSubtitle(data)))) continue;
     if (data.contentHash && content.has(data.contentHash)) continue;
     if (data.contentHash) content.add(data.contentHash);
     candidates.push({
       result: { ...result, fileName: data.fileName || result.fileName },
       selected: false,
-      recommendationLabel: subtitleRecommendationLabel(data),
+      recommendationLabel: subtitleRecommendationLabel(data, task.videoDurationMs),
       contentHash: data.contentHash,
       encoding: data.encoding,
       size: data.size,
@@ -2882,7 +3032,7 @@ async function validateBatchCandidates(results, task, controller, mode) {
         ? data.validation.language.message || "语言与筛选项可能不符" : "",
     });
   }
-  return { candidates, incompleteCount, excludedCount, restrictedCount };
+  return { candidates, incompleteCount, excludedCount, restrictedCount, readFailureCount };
 }
 
 async function saveBatchSubtitle(video, result, language, version, conversion) {
@@ -2926,6 +3076,11 @@ function recordBatchSubtitle(video, saved) {
   video.hasExternalSubtitle = true;
   video.hasSubtitle = true;
   video.existingSubtitleCount = video.existingSubtitles.length;
+}
+
+function nextBatchSubtitleVersion(video) {
+  const existingVersions = video.existingSubtitles.map((name) => Number(String(name).match(/\.v(\d+)\.[^.]+$/i)?.[1] || 0));
+  return Math.max(video.hasExternalSubtitle ? 2 : 1, ...existingVersions.map((version) => version + 1));
 }
 
 function pauseBatchMatch() {
@@ -3077,7 +3232,7 @@ async function previewBatchCandidate(task, candidate, preview, conversion) {
 }
 
 async function saveBatchReview() {
-  if (state.batchSaving || nodes.saveBatchReview.disabled) return;
+  if (state.batchSaving || state.batchSwitching || nodes.saveBatchReview.disabled) return;
   const videos = new Map(state.videoFiles.map((video) => [video.path, video]));
   state.batchSaving = true;
   nodes.batchReviewList.querySelectorAll("button, input").forEach((element) => { element.disabled = true; });
@@ -3093,8 +3248,7 @@ async function saveBatchReview() {
         // 长队列会淘汰早期结果 ID。按原搜索重新登记候选，再使用同一份已勾选的字幕。
         const search = await fetchSearchData(task.request, BATCH_SEARCH_TIMEOUT_MS);
         const currentIds = new Set((search.results || []).map((result) => result.id));
-        const existingVersions = (video.existingSubtitles || []).map((name) => Number(String(name).match(/\.v(\d+)\.[^.]+$/i)?.[1] || 0));
-        let nextVersion = Math.max(task.nextVersion || 1, video.hasExternalSubtitle ? 2 : 1, ...existingVersions.map((version) => version + 1));
+        let nextVersion = Math.max(task.nextVersion || 1, nextBatchSubtitleVersion(video));
         for (const candidate of selected) {
           try {
             if (!currentIds.has(candidate.result.id)) throw new Error("来源已不再返回这份字幕，请重新匹配");
@@ -3142,6 +3296,7 @@ async function retryBatchMatch() {
    * 2) 保留已经保存或跳过的任务
    */
   logger.info("开始重试未成功任务...");
+  if (state.batchSwitching) return;
 
   // 17.1 标记可重试任务
   let retryCount = 0;
@@ -3161,6 +3316,14 @@ async function retryBatchMatch() {
   }
 
   logger.info("重试未成功任务完成", retryCount);
+}
+
+function renderBatchRestoreButton() {
+  const returnToLocal = !state.videoDirectoryId && state.storedLocalBatch;
+  nodes.restoreBatchButton.hidden = !returnToLocal && !state.previousBatch;
+  nodes.restoreBatchButton.disabled = state.batchSwitching || state.batchSaving;
+  nodes.restoreBatchButton.textContent = returnToLocal ? "返回本地批次" : "恢复上一批";
+  nodes.restoreBatchButton.title = returnToLocal ? "" : state.previousBatch?.label || "";
 }
 
 function renderBatchMatchState() {
@@ -3183,6 +3346,7 @@ function renderBatchMatchState() {
   nodes.batchNamingPreset.hidden = cloud;
   nodes.cloudBatchNaming.hidden = !cloud;
   nodes.batchIncludeLabel.hidden = !reviewMode;
+  nodes.batchSaveCountLabel.hidden = reviewMode;
   if (cloud) nodes.cloudBatchNaming.textContent = state.matchVideoName ? "115 · 按视频名保存" : "115 · 按字幕名保存";
   const total = state.batchTasks.length;
   const counts = state.batchTasks.reduce((summary, task) => {
@@ -3199,23 +3363,26 @@ function renderBatchMatchState() {
   if (!total) {
     label.textContent = eligibleCount ? `待匹配 ${eligibleCount} 个视频` : "没有缺字幕视频";
   } else {
-    label.textContent = `完成 ${completed}/${total} · 待选择 ${counts.ready || 0} · 保存 ${counts.saved || 0} · 无结果 ${counts["no-result"] || 0} · 失败 ${counts.failed || 0} · 跳过 ${counts.skipped || 0}`;
+    const autoSaved = state.batchTasks.reduce((sum, task) => sum + (task.automaticSavedHashes?.length || 0), 0);
+    label.textContent = `完成 ${completed}/${total} · 待选择 ${counts.ready || 0} · 保存 ${counts.saved || 0}${autoSaved ? `（自动写入 ${autoSaved} 份）` : ""} · 无结果 ${counts["no-result"] || 0} · 失败 ${counts.failed || 0} · 跳过 ${counts.skipped || 0}`;
   }
 
   // 18.3 同步按钮状态
   const running = state.batchStatus === "running";
-  const locked = running || state.batchSaving;
+  const locked = running || state.batchSaving || state.batchSwitching;
+  renderBatchRestoreButton();
   const retryable = Number(counts.failed || 0) + Number(counts["no-result"] || 0);
   nodes.startBatchButton.disabled = locked || (!eligibleCount && state.batchStatus !== "paused");
   nodes.startBatchButton.textContent = state.batchStatus === "paused"
     ? (reviewMode ? "继续查找候选" : "继续自动保存")
-    : (reviewMode ? "查找候选" : "自动保存首选");
+    : (reviewMode ? "查找候选" : "自动保存");
   nodes.pauseBatchButton.disabled = !running;
   nodes.retryBatchButton.disabled = locked || retryable === 0;
   nodes.namingPreset.disabled = locked;
   nodes.batchConcurrency.disabled = locked;
   nodes.language.disabled = locked;
   nodes.batchMode.disabled = locked || state.batchStatus === "paused";
+  nodes.batchSaveCount.disabled = nodes.batchMode.disabled;
   nodes.batchIncludeExisting.disabled = nodes.batchMode.disabled;
   nodes.openBatchReview.hidden = !counts.ready;
   nodes.openBatchReview.disabled = locked;

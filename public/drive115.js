@@ -25,6 +25,9 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
   const nextButton = document.querySelector("#drive115Next");
   const previousButton = document.querySelector("#drive115Previous");
   const folderButton = document.querySelector("#drive115SelectFolder");
+  const scanForm = document.querySelector("#drive115ScanForm");
+  const scanStart = document.querySelector("#drive115ScanStart");
+  const scanEnd = document.querySelector("#drive115ScanEnd");
   const searchForm = document.querySelector("#drive115SearchForm");
   const searchInput = document.querySelector("#drive115SearchInput");
   const clearSearchButton = document.querySelector("#drive115ClearSearch");
@@ -287,23 +290,35 @@ export function initDrive115({ apiUrl, onSelect, onFolder, getSubtitle, shouldMa
     void loadFiles();
   };
   directionSelect.onchange = () => { void loadFiles(); };
-  folderButton.onclick = async () => {
+  scanForm.onsubmit = async (event) => {
+    event.preventDefault();
     if (!account || loading || scanning || saving || searchTerm) return;
     const run = pageRun;
     const folder = path[path.length - 1];
     const directory = path.map((entry) => entry.name).join(" / ");
     const stillSelected = () => run === pageRun;
+    const start = scanStart.valueAsNumber || 1;
+    const hasRange = Boolean(scanStart.value || scanEnd.value);
     const params = new URLSearchParams({ parentId: folder.id, folderName: folder.id === "0" ? "" : folder.name });
+    if (scanStart.value) params.set("start", scanStart.value);
+    if (scanEnd.value) params.set("end", scanEnd.value);
     scanning = true;
     folderButton.disabled = true;
     message.textContent = "正在扫描 115 文件夹及子目录…";
     try {
       const data = await api(`scan?${params}`);
       if (!stillSelected()) return;
+      if (!data.files.length) {
+        message.textContent = hasRange ? "所选范围内没有可扫描的视频。" : "此文件夹及子目录没有可扫描的视频。";
+        return;
+      }
       const files = data.files.map((file) => ({ ...file, remote115: true, accountId: data.accountId,
         directoryLabel: [directory, ...file.parentNames.slice(folder.id === "0" ? 0 : 1)].join(" / ") }));
       close();
-      await onFolder({ selected: true, label: `115 · ${directory}`, files, truncated: data.truncated });
+      const lastPosition = start + files.length - 1;
+      const rangeLabel = hasRange ? ` · 第 ${start}–${lastPosition} 部` : "";
+      await onFolder({ selected: true, label: `115 · ${directory}${rangeLabel}`, files,
+        nextStart: data.truncated ? lastPosition + 1 : null });
     } catch (error) {
       if (stillSelected()) message.textContent = error.message;
     } finally {

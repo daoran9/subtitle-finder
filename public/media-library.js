@@ -1,4 +1,4 @@
-import { extractAvIdentity, sameAvIdentity } from "./av-identity.js";
+import { extractAvIdentity } from "./av-identity.js";
 
 export const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"]);
 export const SUBTITLE_EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt", ".sub"]);
@@ -53,13 +53,13 @@ export function analyzeMediaFile(fileName, options = {}) {
   const readableStem = normalizeSeparators(rawStem);
   const parentNames = Array.isArray(options.parentNames) ? options.parentNames : [];
 
-  // 1.2 先识别高置信番号，避免恢复文件被当成普通电影标题。
-  const avIdentity = extractAvIdentity(safeFileName);
-
-  // 1.3 没有番号时继续沿用电影和剧集解析。
   const episodeInfo = extractEpisodeInfo(readableStem, parentNames);
   const parentTitle = selectParentTitle(parentNames);
-  const year = extractYear(readableStem) || extractYear(parentTitle);
+  const fileYear = extractYear(readableStem);
+  const year = fileYear || extractYear(parentTitle);
+  const identity = extractAvIdentity(safeFileName);
+  // 带季集号的发行名里，剧名后的年份可能被识别为「剧名-年份」编号。
+  const avIdentity = episodeInfo && fileYear && identity?.canonicalCode.endsWith(`-${fileYear}`) ? null : identity;
 
   // 1.4 选择并清理标题
   const titleSource = episodeInfo
@@ -210,43 +210,40 @@ export function applyNfoMetadata(media, metadata) {
  * 4) 剧集必须核对季号和集号，避免把同一季其他集误判为已有字幕
  */
 export function findExistingSubtitles(videoFileName, subtitleFileNames, options = {}) {
-  logger.info("开始匹配已有字幕...", videoFileName);
+  return createExistingSubtitleMatcher(subtitleFileNames, options)(videoFileName);
+}
 
-  // 2.1 解析视频身份
-  const video = analyzeMediaFile(videoFileName, options);
-  const videoStem = stripExtension(getFileName(videoFileName));
-  const normalizedVideoStem = normalizeComparableText(videoStem);
+export function createExistingSubtitleMatcher(subtitleFileNames, options = {}) {
+  const subtitles = (Array.isArray(subtitleFileNames) ? subtitleFileNames : [])
+    .filter((name) => SUBTITLE_EXTENSIONS.has(getExtension(name).toLowerCase()))
+    .map((name) => {
+      const stem = stripExtension(getFileName(name));
+      return { name, stem, comparableStem: normalizeComparableText(stripSubtitleQualifiers(stem)), media: analyzeMediaFile(name, options) };
+    });
 
-  // 2.2 逐个核对同目录字幕
-  const matches = (Array.isArray(subtitleFileNames) ? subtitleFileNames : []).filter((subtitleFileName) => {
-    const subtitleExtension = getExtension(subtitleFileName).toLowerCase();
-    if (!SUBTITLE_EXTENSIONS.has(subtitleExtension)) return false;
+  return (videoFileName) => {
+    const video = analyzeMediaFile(videoFileName, options);
+    const videoStem = stripExtension(getFileName(videoFileName));
+    const normalizedVideoStem = normalizeComparableText(videoStem);
+    const matches = subtitles.filter(({ stem, comparableStem, media: subtitle }) => {
+      if (video.catalogKey && subtitle.catalogKey) return video.catalogKey === subtitle.catalogKey;
+      if (isDirectSubtitleNameMatch(videoStem, stem)) return true;
+      if (video.catalogKey) return false;
+      if (video.mediaType === "episode") {
+        if (subtitle.mediaType !== "episode") return false;
+        if (video.season !== subtitle.season || video.episode !== subtitle.episode) return false;
+        if (video.episodeEnd && subtitle.episodeEnd && video.episodeEnd !== subtitle.episodeEnd) return false;
+        if (!video.title || !subtitle.title) return true;
+        return titlesReferToSameMedia(video.title, subtitle.title);
+      }
 
-    const subtitleStem = stripExtension(getFileName(subtitleFileName));
-    const subtitle = analyzeMediaFile(subtitleFileName, options);
-    if (video.catalogKey) {
-      if (subtitle.catalogKey) return sameAvIdentity(video.catalogKey, subtitle.catalogKey);
-      return isDirectSubtitleNameMatch(videoStem, subtitleStem);
-    }
-    if (isDirectSubtitleNameMatch(videoStem, subtitleStem)) return true;
-    if (video.mediaType === "episode") {
-      if (subtitle.mediaType !== "episode") return false;
-      if (video.season !== subtitle.season || video.episode !== subtitle.episode) return false;
-      if (video.episodeEnd && subtitle.episodeEnd && video.episodeEnd !== subtitle.episodeEnd) return false;
-      if (!video.title || !subtitle.title) return true;
-      return titlesReferToSameMedia(video.title, subtitle.title);
-    }
-
-    if (subtitle.mediaType !== "movie") return false;
-    if (video.year && subtitle.year && video.year !== subtitle.year) return false;
-    if (titlesReferToSameMedia(video.title, subtitle.title)) return true;
-    return normalizedVideoStem === normalizeComparableText(stripSubtitleQualifiers(subtitleStem));
-  });
-
-  // 2.3 返回稳定排序后的字幕名
-  const result = matches.sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" }));
-  logger.info("匹配已有字幕完成", result.length);
-  return result;
+      if (subtitle.mediaType !== "movie") return false;
+      if (video.year && subtitle.year && video.year !== subtitle.year) return false;
+      return titlesReferToSameMedia(video.title, subtitle.title) || normalizedVideoStem === comparableStem;
+    });
+    return matches.map(({ name }) => name)
+      .sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" }));
+  };
 }
 
 /*

@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld("subtitleFinder", {
   cancelSubtitleSync: (payload) => ipcRenderer.invoke("subtitle:cancel-sync", payload),
   getContextMenuState: () => ipcRenderer.invoke("subtitle:get-context-menu-state"),
   setContextMenuState: (payload) => ipcRenderer.invoke("subtitle:set-context-menu-state", payload),
-  consumeLaunchTarget: () => ipcRenderer.invoke("subtitle:consume-launch-target"),
+  consumeLaunchTarget: (payload) => ipcRenderer.invoke("subtitle:consume-launch-target", payload),
   openThirdPartyLicenses: () => ipcRenderer.invoke("subtitle:open-third-party-licenses"),
   onLaunchTargetAvailable: (callback) => {
     if (typeof callback !== "function") return () => {};
