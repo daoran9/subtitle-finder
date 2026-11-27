@@ -646,6 +646,12 @@ class SubtitleExcludedError extends Error {
   }
 }
 
+class SubtitleTooSmallError extends Error {
+  constructor(minimumKb) {
+    super(`字幕体积低于 ${minimumKb} KB`);
+  }
+}
+
 class SubtitleReadError extends Error {
   constructor(message, { stage, httpStatus, responseType, invalidContent = false } = {}) {
     super(message);
@@ -1665,7 +1671,7 @@ async function handlePreview(url, res) {
   try {
     validated = await getValidatedSubtitlePayload(result, language, conversion);
   } catch (error) {
-    sendJson(res, 422, { excluded: error instanceof SubtitleExcludedError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { excluded: error instanceof SubtitleExcludedError, tooSmall: error instanceof SubtitleTooSmallError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("预览字幕完成: 校验失败", error.message);
     return;
   }
@@ -1729,7 +1735,7 @@ async function handleValidate(url, res) {
     });
     logger.info("校验字幕候选完成: valid");
   } catch (error) {
-    sendJson(res, 422, { valid: false, excluded: error instanceof SubtitleExcludedError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
+    sendJson(res, 422, { valid: false, excluded: error instanceof SubtitleExcludedError, tooSmall: error instanceof SubtitleTooSmallError, invalidContent: error.invalidContent === true, error: "字幕校验失败", detail: String(error?.message || error) });
     logger.info("校验字幕候选完成: invalid", error.message);
   }
 }
@@ -1830,6 +1836,7 @@ async function getValidatedSubtitlePayload(result, language, conversion, { forSa
 
   // 5.5.2 原文请求直接返回已校验内容
   if (!conversion) {
+    assertMinimumSubtitleSize(original.payload.buffer.length);
     logger.info("读取有效字幕内容完成: original");
     return { ...original, saveRestriction };
   }
@@ -1845,9 +1852,11 @@ async function getValidatedSubtitlePayload(result, language, conversion, { forSa
     language: conversion,
   });
   if (!convertedValidation.valid) throw new Error(convertedValidation.message || "转换后的字幕结构无效");
+  const buffer = Buffer.from(convertedText, "utf8");
+  assertMinimumSubtitleSize(buffer.length);
   const converted = {
     payload: {
-      buffer: Buffer.from(convertedText, "utf8"),
+      buffer,
       contentType: getSubtitleContentType(convertedFileName),
       fileName: convertedFileName,
     },
@@ -1859,6 +1868,11 @@ async function getValidatedSubtitlePayload(result, language, conversion, { forSa
   };
   logger.info("读取有效字幕内容完成", conversion);
   return converted;
+}
+
+function assertMinimumSubtitleSize(size) {
+  const minimumKb = runtimePreferences.minSubtitleSizeKb;
+  if (size < minimumKb * 1024) throw new SubtitleTooSmallError(minimumKb);
 }
 
 export function normalizeSubtitlePayload(payload, decoded) {

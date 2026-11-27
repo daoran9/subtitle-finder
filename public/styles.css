@@ -1251,11 +1251,21 @@ tbody tr.is-active {
   padding: 9px 10px;
 }
 
+.settings-field input[type="number"] {
+  width: 120px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+}
+
 .settings-field small {
   font-weight: 400;
 }
 
-.settings-field textarea:focus {
+.settings-field textarea:focus,
+.settings-field input[type="number"]:focus {
   border-color: var(--accent);
   outline: 2px solid rgba(37, 107, 74, 0.15);
 }

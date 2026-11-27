@@ -148,6 +148,7 @@ test("通用设置跨重启恢复并限制字段", async () => {
     assert.equal(defaults.autoConvertChinese, false);
     assert.equal(defaults.preferredChinese, "zh-CN");
     assert.equal(defaults.subtitleExclusionKeywords, "");
+    assert.equal(defaults.minSubtitleSizeKb, 20);
     assert.equal(defaults.subtitleSaveFilter.enabled, false);
     assert.deepEqual(defaults.subtitleSaveFilter.keywords.split("\n"), ["色花", "色花堂", "sehua", "sehuatang", "98T", "98堂", "[括号说明]"]);
     const legacyRules = ["**/Extras/**", "*.sample.*"];
@@ -155,10 +156,12 @@ test("通用设置跨重启恢复并限制字段", async () => {
     const migrated = await store.readPreferences();
     assert.deepEqual(migrated.scanVideoExclusionRules, legacyRules);
     assert.deepEqual(migrated.scanFolderExclusionRules, legacyRules);
+    assert.equal(migrated.minSubtitleSizeKb, 20);
     await store.writePreferences({
       scanVideoExclusionRules: ["*.sample.*", "*-CHS.*"],
       scanFolderExclusionRules: [],
       subtitleExclusionKeywords: "机器翻译\nBad release",
+      minSubtitleSizeKb: 0,
       subtitleSaveFilter: { enabled: true, keywords: "  版本标记  " },
       customDictionary: "软件=軟件\n出租车=計程車",
       matchVideoName: false,
@@ -174,6 +177,7 @@ test("通用设置跨重启恢复并限制字段", async () => {
       scanVideoExclusionRules: ["*.sample.*", "*-CHS.*"],
       scanFolderExclusionRules: [],
       subtitleExclusionKeywords: "机器翻译\nBad release",
+      minSubtitleSizeKb: 0,
       subtitleSaveFilter: { enabled: true, keywords: "版本标记" },
       customDictionary: "软件=軟件\n出租车=計程車",
       matchVideoName: false,

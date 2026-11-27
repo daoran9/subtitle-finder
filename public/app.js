@@ -1,5 +1,5 @@
 import { analyzeMediaFile, compareMediaEntries, findExistingSubtitles, formatMediaDuration } from "./media-library.js";
-import { analyzeSubtitleLanguage, buildSubtitleBaseName } from "./subtitle-rules.js";
+import { analyzeSubtitleLanguage, buildSubtitleBaseName, DEFAULT_MIN_SUBTITLE_SIZE_KB } from "./subtitle-rules.js";
 import { parseCustomConversionDictionary } from "./conversion-dictionary.js";
 import { parseScanExclusionSettings } from "./scan-rules.js";
 import { initDrive115 } from "./drive115.js";
@@ -46,6 +46,7 @@ const state = {
   preferredChinese: "zh-CN",
   scanExclusions: { scanVideoExclusionRules: [], scanFolderExclusionRules: [] },
   subtitleExclusionKeywords: "",
+  minSubtitleSizeKb: DEFAULT_MIN_SUBTITLE_SIZE_KB,
   subtitleSaveFilter: {},
   customDictionary: "",
   singleVideoMode: false,
@@ -120,6 +121,7 @@ const nodes = {
   scanFolderExclusionRules: document.querySelector("#scanFolderExclusionRulesInput"),
   subtitleExclusionKeywords: document.querySelector("#subtitleExclusionKeywordsInput"),
   subtitleSaveFilterEnabled: document.querySelector("#subtitleSaveFilterEnabled"),
+  minSubtitleSize: document.querySelector("#minSubtitleSizeInput"),
   subtitleSaveFilterKeywords: document.querySelector("#subtitleSaveFilterKeywords"),
   customDictionary: document.querySelector("#customDictionaryInput"),
   autoConvertChinese: document.querySelector("#autoConvertChinese"),
@@ -289,8 +291,14 @@ nodes.downloadButton.addEventListener("click", async () => {
 });
 
 nodes.conversionSelect.addEventListener("change", () => {
-  state.conversionTarget = nodes.conversionSelect.value || "";
-  if (state.selectedId) void previewSubtitle(state.selectedId, { preserveSelection: true });
+  const target = nodes.conversionSelect.value || "";
+  if (target === state.conversionTarget) return;
+  state.conversionTarget = target;
+  if (state.minSubtitleSizeKb && state.lastSearchQuery) {
+    void searchSubtitles(state.lastSearchQuery, { preserveSelection: true });
+  } else if (state.selectedId) {
+    void previewSubtitle(state.selectedId, { preserveSelection: true });
+  }
 });
 
 // 1.6 绑定批量下载按钮
@@ -474,7 +482,7 @@ async function checkForUpdates() {
   }
 }
 
-async function searchSubtitles(searchQuery) {
+async function searchSubtitles(searchQuery, { preserveSelection = false } = {}) {
   /*
    * ================================================================================
    * 步骤2：执行字幕搜索
@@ -486,7 +494,7 @@ async function searchSubtitles(searchQuery) {
    */
   logger.info("开始搜索字幕...");
   await settingsReadyPromise;
-  if (state.autoConvertChinese) syncConversionControl(true);
+  if (state.autoConvertChinese && !preserveSelection) syncConversionControl(true);
 
   // 2.1 建立本次搜索归属，并立即取消上一次网络等待
   const searchRunId = state.searchRunId + 1;
@@ -509,6 +517,8 @@ async function searchSubtitles(searchQuery) {
   }
 
   // 2.3 选择本地视频时补齐指纹和内封字幕信息
+  const previewId = preserveSelection ? state.selectedId : "";
+  const checkedIds = preserveSelection ? new Set(state.selectedDownloadIds) : null;
   setStatus("搜索中", "busy");
   nodes.resultSummary.textContent = `搜索 ${query}`;
   state.lastSearchQuery = query;
@@ -569,7 +579,8 @@ async function searchSubtitles(searchQuery) {
     state.results = data.results || [];
     addRecent(query);
     const filterEnabled = state.subtitleSaveFilter.enabled;
-    if ((!filterEnabled && !videoDurationMs) || !state.results.length) {
+    const minimumKb = state.minSubtitleSizeKb;
+    if ((!filterEnabled && !minimumKb && !videoDurationMs) || !state.results.length) {
       renderResults(state.results);
     } else {
       nodes.resultsBody.innerHTML = `<tr class="empty-row"><td colspan="5">正在校验字幕正文…</td></tr>`;
@@ -579,11 +590,11 @@ async function searchSubtitles(searchQuery) {
     setStatus(errorCount ? "部分完成" : "完成", errorCount ? "warn" : "ok");
     const cacheLabel = data.cached ? " · 缓存" : "";
     const errorLabel = errorCount ? ` · ${errorCount} 个源失败` : "";
-    const updateSummary = (count, excluded, progress = "", filtered = false, invalid = 0) => {
+    const updateSummary = (count, excluded, progress = "", filtered = false, invalid = 0, tooSmall = 0) => {
       const filterLabel = excluded ? ` · 关键词排除 ${excluded} 条` : "";
       const countLabel = filtered ? `${count} 条命中保存特征` : `${count} 条可选`;
       const invalidLabel = invalid ? ` · ${invalid} 条正文无效` : "";
-      nodes.resultSummary.textContent = `${countLabel}${invalidLabel}${errorLabel}${filterLabel}${cacheLabel}${progress}`;
+      nodes.resultSummary.textContent = `${countLabel}${invalidLabel}${errorLabel}${filterLabel}${subtitleSizeFilterLabel(tooSmall, minimumKb)}${cacheLabel}${progress}`;
     };
     const excludedByTitle = Number(data.excludedCount || 0);
     updateSummary(state.results.length, excludedByTitle);
@@ -593,12 +604,15 @@ async function searchSubtitles(searchQuery) {
     state.searchRankingController = controller;
     updateSummary(state.results.length, excludedByTitle, ` · 校验正文 0/${state.results.length}`);
     try {
-      const checks = await checkSubtitleCandidates(state.results, { language, videoDurationMs }, controller, (done, total) => {
+      const conversion = minimumKb ? state.conversionTarget : "";
+      const checks = await checkSubtitleCandidates(state.results, { language, videoDurationMs, conversion }, controller, (done, total) => {
         updateSummary(state.results.length, excludedByTitle, ` · 校验正文 ${done}/${total}`);
       });
       if (controller.signal.aborted || state.searchRunId !== searchRunId) return;
+      const keywordCount = excludedByTitle + checks.filter(({ data }) => data?.excluded).length;
+      let tooSmallCount = checks.filter(({ data }) => data?.tooSmall).length;
       const visible = checks.filter(({ result, data }) => {
-        if (!data?.excluded) return true;
+        if (!data?.excluded && !data?.tooSmall) return true;
         state.selectedDownloadIds.delete(result.id);
         return false;
       });
@@ -606,18 +620,27 @@ async function searchSubtitles(searchQuery) {
         if (invalidContent) state.selectedDownloadIds.delete(result.id);
         return {
           ...result,
+          size: data?.size ? formatBytes(data.size) : result.size,
           recommendationLabel: data?.valid ? subtitleRecommendationLabel(data, videoDurationMs) : "",
           invalidContent,
           validationError,
           saveRestriction: data?.saveRestriction || (filterEnabled && !data?.valid ? "未能核对保存特征" : ""),
         };
       });
+      if (checkedIds) {
+        for (const result of state.results) {
+          if (checkedIds.has(result.id) && canSelectSearchResult(result)) state.selectedDownloadIds.add(result.id);
+        }
+      }
       renderResults(state.results);
       setActiveRow(state.selectedId);
-      state.refreshResultSummary = () => updateSummary(state.results.filter(canSelectSearchResult).length,
-        excludedByTitle + checks.length - visible.length, "", filterEnabled,
-        state.results.filter((item) => item.invalidContent).length);
+      state.refreshResultSummary = (additionalTooSmall = 0) => {
+        tooSmallCount += additionalTooSmall;
+        updateSummary(state.results.filter(canSelectSearchResult).length, keywordCount, "", filterEnabled,
+          state.results.filter((item) => item.invalidContent).length, tooSmallCount);
+      };
       state.refreshResultSummary();
+      if (previewId && !state.selectedId) void previewSubtitle(previewId);
     } finally {
       if (state.searchRankingController === controller) state.searchRankingController = null;
     }
@@ -874,6 +897,13 @@ function canSelectSearchResult(result) {
 
 function updatePreviewCandidate(id, data) {
   const result = state.results.find((item) => item.id === id);
+  if (result && data.tooSmall) {
+    state.results = state.results.filter((item) => item.id !== id);
+    state.selectedDownloadIds.delete(id);
+    renderResults(state.results);
+    state.refreshResultSummary?.(1);
+    return;
+  }
   if (!result || (!data.invalidContent && !data.validation?.valid)) return;
   if (!result.invalidContent && !result.validationError && !data.invalidContent) return;
   result.invalidContent = data.invalidContent === true;
@@ -1028,6 +1058,7 @@ async function openSettingsDialog() {
   nodes.subtitleExclusionKeywords.value = state.subtitleExclusionKeywords;
   const filter = state.subtitleSaveFilter;
   nodes.subtitleSaveFilterEnabled.checked = Boolean(filter.enabled);
+  nodes.minSubtitleSize.value = state.minSubtitleSizeKb;
   nodes.subtitleSaveFilterKeywords.value = filter.keywords || "";
   nodes.customDictionary.value = state.customDictionary;
   nodes.autoConvertChinese.checked = state.autoConvertChinese;
@@ -1098,6 +1129,10 @@ async function saveSettings() {
       scanFolderExclusionRules: nodes.scanFolderExclusionRules.value,
     });
     parseCustomConversionDictionary(nodes.customDictionary.value);
+    const minSubtitleSizeKb = nodes.minSubtitleSize.valueAsNumber;
+    if (!Number.isSafeInteger(minSubtitleSizeKb) || minSubtitleSizeKb < 0) {
+      throw new Error("最小字幕体积请输入非负整数");
+    }
     const response = await fetch(apiUrl("/api/settings"), {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -1106,6 +1141,7 @@ async function saveSettings() {
           matchVideoName: nodes.matchVideoName.checked,
           ...scanExclusions,
           subtitleExclusionKeywords: nodes.subtitleExclusionKeywords.value,
+          minSubtitleSizeKb,
           subtitleSaveFilter: {
             enabled: nodes.subtitleSaveFilterEnabled.checked,
             keywords: nodes.subtitleSaveFilterKeywords.value,
@@ -1121,15 +1157,23 @@ async function saveSettings() {
     state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusions = parseScanExclusionSettings(data.settings);
     state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
+    const nextMinimumKb = data.settings?.minSubtitleSizeKb ?? minSubtitleSizeKb;
+    const minimumChanged = state.minSubtitleSizeKb !== nextMinimumKb;
+    state.minSubtitleSizeKb = nextMinimumKb;
     const nextFilter = data.settings?.subtitleSaveFilter || {};
     const filterChanged = (state.subtitleSaveFilter.enabled || nextFilter.enabled)
       && JSON.stringify(state.subtitleSaveFilter) !== JSON.stringify(nextFilter);
     state.subtitleSaveFilter = nextFilter;
-    state.customDictionary = String(data.settings?.customDictionary || "");
+    const nextDictionary = String(data.settings?.customDictionary || "");
+    const dictionaryChanged = nextDictionary !== state.customDictionary;
+    state.customDictionary = nextDictionary;
     const previousConversion = state.conversionTarget;
     applyChinesePreferences(data.settings);
+    const sizeRuleChanged = minimumChanged || (state.minSubtitleSizeKb > 0
+      && (previousConversion !== state.conversionTarget || (state.conversionTarget && dictionaryChanged)));
     drive115UI.render();
     renderBatchMatchState();
+    if (minimumChanged && !nodes.batchReviewModal.hidden) renderBatchReview();
 
     // 6.4.3 Windows 保存右键菜单状态
     if (window.subtitleFinder?.setContextMenuState) {
@@ -1141,8 +1185,8 @@ async function saveSettings() {
     nodes.settingsMessage.textContent = "已保存";
     nodes.settingsMessage.dataset.tone = "ok";
     setStatus("设置已保存", "ok");
-    if (filterChanged && state.lastSearchQuery && (state.results.length || state.searchController)) {
-      void searchSubtitles(state.lastSearchQuery);
+    if (state.lastSearchQuery && (sizeRuleChanged || (filterChanged && (state.results.length || state.searchController)))) {
+      void searchSubtitles(state.lastSearchQuery, { preserveSelection: sizeRuleChanged });
     } else if (state.selectedId && (state.conversionTarget || previousConversion)) {
       void previewSubtitle(state.selectedId, { preserveSelection: true });
     }
@@ -1273,10 +1317,10 @@ async function previewSubtitle(id, options = {}) {
     const data = await response.json();
     if (state.previewController !== controller) return;
     updatePreviewCandidate(id, data);
-    if (data.excluded) {
+    if (data.excluded || data.tooSmall) {
       state.previewText = "";
       nodes.previewText.textContent = data.detail;
-      nodes.previewMeta.textContent = "已按关键词排除";
+      nodes.previewMeta.textContent = data.tooSmall ? "未达到最小字幕体积" : "已按关键词排除";
       renderSubtitleSyncState();
       setStatus("已排除", "warn");
       return;
@@ -2343,6 +2387,7 @@ async function restoreAppSettings() {
     state.matchVideoName = data.settings?.matchVideoName !== false;
     state.scanExclusions = parseScanExclusionSettings(data.settings);
     state.subtitleExclusionKeywords = String(data.settings?.subtitleExclusionKeywords || "");
+    state.minSubtitleSizeKb = data.settings?.minSubtitleSizeKb ?? DEFAULT_MIN_SUBTITLE_SIZE_KB;
     state.subtitleSaveFilter = data.settings?.subtitleSaveFilter || {};
     state.customDictionary = String(data.settings?.customDictionary || "");
     applyChinesePreferences(data.settings);
@@ -2834,11 +2879,12 @@ async function processBatchTask(task, runId, mode, saveCount) {
     });
     const data = await fetchSearchData(request, BATCH_SEARCH_TIMEOUT_MS, controller);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
-    const { candidates, incompleteCount, excludedCount, restrictedCount, readFailureCount } = await validateBatchCandidates(data.results || [], task, controller, mode);
+    const { candidates, incompleteCount, excludedCount, restrictedCount, tooSmallCount, readFailureCount } = await validateBatchCandidates(data.results || [], task, controller, mode);
     if (state.batchRunId !== runId || state.batchStatus !== "running") return;
     const keywordCount = Number(data.excludedCount || 0) + excludedCount;
     const excludedLabel = keywordCount ? ` · 关键词排除 ${keywordCount} 份` : "";
     const restrictedLabel = restrictedCount ? ` · ${restrictedCount} 份未命中保存特征` : "";
+    const sizeLabel = subtitleSizeFilterLabel(tooSmallCount);
     const sourceFailureCount = Array.isArray(data.errors) ? data.errors.length : 0;
     const failureLabel = [
       sourceFailureCount ? `${sourceFailureCount} 个来源搜索失败` : "",
@@ -2847,7 +2893,7 @@ async function processBatchTask(task, runId, mode, saveCount) {
     if (!candidates.length && !savedHashes.length) {
       task.status = "no-result";
       task.message = (incompleteCount ? `没有合格字幕 · 排除 ${incompleteCount} 份明显残缺字幕`
-        : keywordCount || restrictedCount ? "没有符合条件的字幕" : (data.results || []).length ? "候选字幕均未通过校验" : "本轮未找到可用字幕") + excludedLabel + restrictedLabel + (failureLabel ? ` · ${failureLabel}` : "");
+        : keywordCount || restrictedCount || tooSmallCount ? "没有符合条件的字幕" : (data.results || []).length ? "候选字幕均未通过校验" : "本轮未找到可用字幕") + excludedLabel + restrictedLabel + sizeLabel + (failureLabel ? ` · ${failureLabel}` : "");
       task.updatedAt = Date.now();
       renderBatchMatchState();
       renderVideoFiles();
@@ -2860,7 +2906,8 @@ async function processBatchTask(task, runId, mode, saveCount) {
       task.request = request;
       task.candidates = candidates;
       task.incompleteCount = incompleteCount;
-      task.message = `${candidates.length} 份可选${incompleteCount ? ` · 排除 ${incompleteCount} 份残缺字幕` : ""}${excludedLabel}${restrictedLabel}`;
+      task.sizeFilterLabel = sizeLabel;
+      task.message = `${candidates.length} 份可选${incompleteCount ? ` · 排除 ${incompleteCount} 份残缺字幕` : ""}${excludedLabel}${restrictedLabel}${sizeLabel}`;
       task.updatedAt = Date.now();
       renderBatchMatchState();
       renderVideoFiles();
@@ -2898,6 +2945,7 @@ async function processBatchTask(task, runId, mode, saveCount) {
     task.status = retryableShortage ? "failed" : "saved";
     task.message = `已保存 ${savedHashes.length} 份`;
     if (shortage) task.message += retryableShortage ? ` · ${failureLabel}，可重试` : " · 其余无合格字幕";
+    task.message += sizeLabel;
     task.updatedAt = Date.now();
     renderBatchMatchState();
     renderVideoFiles();
@@ -2947,7 +2995,7 @@ async function checkSubtitleCandidates(results, options, controller, onProgress)
           controller,
         });
         const data = await response.json();
-        if ((response.ok && data.valid) || data.excluded) check.data = data;
+        if ((response.ok && data.valid) || data.excluded || data.tooSmall) check.data = data;
         else {
           check.invalidContent = data.invalidContent === true;
           check.validationError = data.detail || data.error;
@@ -2972,6 +3020,10 @@ function candidateIdentityRank(result) {
 
 function canRecommendSubtitle(data) {
   return Boolean(data?.valid && !data.batchIssue && !data.saveRestriction && data.validation?.language?.match !== false);
+}
+
+function subtitleSizeFilterLabel(count, minimumKb = state.minSubtitleSizeKb) {
+  return count && minimumKb ? ` · 已过滤 ${count} 份低于 ${minimumKb} KB 的字幕` : "";
 }
 
 function subtitleDurationDelta(data, videoDurationMs) {
@@ -3012,6 +3064,7 @@ async function validateBatchCandidates(results, task, controller, mode) {
   const incompleteCount = checks.filter(({ data }) => data?.batchIssue).length;
   const excludedCount = checks.filter(({ data }) => data?.excluded).length;
   const restrictedCount = checks.filter(({ data }) => data?.saveRestriction).length;
+  const tooSmallCount = checks.filter(({ data }) => data?.tooSmall).length;
   const readFailureCount = checks.filter(({ data, invalidContent }) => !data && !invalidContent).length;
   const content = new Set(task.automaticSavedHashes || []);
   const candidates = [];
@@ -3032,7 +3085,7 @@ async function validateBatchCandidates(results, task, controller, mode) {
         ? data.validation.language.message || "语言与筛选项可能不符" : "",
     });
   }
-  return { candidates, incompleteCount, excludedCount, restrictedCount, readFailureCount };
+  return { candidates, incompleteCount, excludedCount, restrictedCount, tooSmallCount, readFailureCount };
 }
 
 async function saveBatchSubtitle(video, result, language, version, conversion) {
@@ -3143,9 +3196,11 @@ function renderBatchReview() {
     const summary = document.createElement("summary");
     const rows = document.createElement("div");
     const excluded = task.incompleteCount ? ` · 排除 ${task.incompleteCount} 份残缺字幕` : "";
+    const candidates = visibleBatchReviewCandidates(task);
+    const sizeLabel = subtitleSizeFilterLabel(task.candidates.length - candidates.length);
     const video = videos.get(task.videoPath);
     const duration = formatMediaDuration(video.durationMs || video.videoDurationMs);
-    summary.textContent = [video.name, duration, `${task.candidates.length} 份${excluded}`].filter(Boolean).join(" · ");
+    summary.textContent = [video.name, duration, `${candidates.length} 份${excluded}${task.sizeFilterLabel || ""}${sizeLabel}`].filter(Boolean).join(" · ");
     group.append(summary, rows);
     group.addEventListener("toggle", () => {
       if (group.open && !rows.hasChildNodes()) renderBatchReviewRows(rows, task);
@@ -3158,20 +3213,22 @@ function renderBatchReview() {
 }
 
 function renderBatchReviewRows(container, task) {
+  const candidates = visibleBatchReviewCandidates(task);
+  if (!candidates.length) return;
   const select = document.createElement("button");
   select.type = "button";
   select.className = "batch-review-secondary batch-review-select";
   select.textContent = "切换本片全选";
   select.disabled = state.batchSaving;
   select.addEventListener("click", () => {
-    const unsaved = task.candidates.filter((candidate) => !candidate.saved);
+    const unsaved = candidates.filter((candidate) => !candidate.saved);
     const checked = unsaved.some((candidate) => !candidate.selected);
     for (const candidate of unsaved) candidate.selected = checked;
     container.querySelectorAll('input:not(:disabled)').forEach((input) => { input.checked = checked; });
     updateBatchReviewSelection();
   });
   container.append(select);
-  for (const candidate of task.candidates) {
+  for (const candidate of candidates) {
     const { result, encoding, size, cueCount, languageWarning, recommendationLabel } = candidate;
     const row = document.createElement("div");
     row.className = "batch-review-row";
@@ -3196,8 +3253,12 @@ function renderBatchReviewRows(container, task) {
   }
 }
 
+function visibleBatchReviewCandidates(task) {
+  return (task.candidates || []).filter((candidate) => candidate.saved || candidate.size >= state.minSubtitleSizeKb * 1024);
+}
+
 function updateBatchReviewSelection(message = "") {
-  const count = state.batchTasks.reduce((total, task) => total + (task.candidates || [])
+  const count = state.batchTasks.reduce((total, task) => total + visibleBatchReviewCandidates(task)
     .filter((candidate) => candidate.selected && !candidate.saved).length, 0);
   nodes.batchReviewProgress.textContent = message ? `${message} · 已选 ${count} 份` : `已选 ${count} 份`;
   nodes.closeBatchReview.disabled = state.batchSaving;
@@ -3241,7 +3302,7 @@ async function saveBatchReview() {
   let failedCount = 0;
   try {
     for (const task of state.batchTasks) {
-      const selected = (task.candidates || []).filter((candidate) => candidate.selected && !candidate.saved);
+      const selected = visibleBatchReviewCandidates(task).filter((candidate) => candidate.selected && !candidate.saved);
       const video = videos.get(task.videoPath);
       if (!video || !selected.length) continue;
       try {

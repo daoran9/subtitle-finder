@@ -393,6 +393,11 @@
             <textarea id="subtitleExclusionKeywordsInput" rows="3" maxlength="4000" spellcheck="false" aria-describedby="subtitleExclusionHelp"></textarea>
             <small id="subtitleExclusionHelp" class="muted">每行一个关键词，忽略大小写。搜索时检查标题和文件名，读取字幕后检查正文。</small>
           </label>
+          <label class="settings-field" for="minSubtitleSizeInput">
+            <span>最小字幕体积（KB）</span>
+            <input id="minSubtitleSizeInput" type="number" min="0" step="1" required aria-describedby="minSubtitleSizeHelp" />
+            <small id="minSubtitleSizeHelp" class="muted">搜索和保存均按实际字幕文件大小过滤。填 0 关闭。</small>
+          </label>
           <label class="toggle-row">
             <span>仅保存匹配特征的字幕</span>
             <input id="subtitleSaveFilterEnabled" type="checkbox" role="switch" aria-describedby="subtitleSaveFilterHelp" />

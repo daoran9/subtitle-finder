@@ -1,5 +1,7 @@
 import { extractAvIdentity, sameAvIdentity } from "./av-identity.js";
 
+export const DEFAULT_MIN_SUBTITLE_SIZE_KB = 20;
+
 const SOURCE_QUALITY_WEIGHT = {
   shooter: 18,
   "thunder-fingerprint": 18,

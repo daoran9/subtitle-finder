@@ -2,26 +2,24 @@
 
 Windows 和 Android 上的字幕检索与管理工具。按片名、季集号或视频文件查找字幕，预览后保存到本机，也可以为 115 网盘中的视频查找并保存字幕。
 
-## 下载 v1.7.4
+## 下载 v1.7.5
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.Setup.1.7.4.exe) | 安装后从开始菜单启动。升级前先退出旧版，沿用原安装目录 |
-| [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.1.7.4.exe) | 放到可写目录，双击运行。升级时保留同目录的 `SubtitleFinderData` |
-| [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.4/SubtitleFinder.Android.1.7.4.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
+| [Windows x64 安装包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.5/SubtitleFinder.Setup.1.7.5.exe) | 安装后从开始菜单启动。升级前先退出旧版，沿用原安装目录 |
+| [Windows x64 便携包](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.5/SubtitleFinder.1.7.5.exe) | 放到可写目录，双击运行。升级时保留同目录的 `SubtitleFinderData` |
+| [Android APK](https://github.com/daoran9/subtitle-finder/releases/download/v1.7.5/SubtitleFinder.Android.1.7.5.apk) | 最低 Android 5.1，可覆盖安装同签名的旧版 |
 
-[v1.7.4 发布说明与校验值](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.4) · [最新正式版](https://github.com/daoran9/subtitle-finder/releases/latest) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
+[v1.7.5 发布说明与校验值](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.5) · [最新正式版](https://github.com/daoran9/subtitle-finder/releases/latest) · [历史版本](https://github.com/daoran9/subtitle-finder/releases)
 
 Windows 程序未签名，首次运行时系统可能显示未知发布者。Android 若拦截 APK 安装，可在系统设置中允许当前来源安装应用。
 
-## v1.7.4 更新
+## v1.7.5 更新
 
-- **自动保存多份字幕**。每部视频可选保存 1 到 5 份。本地和 115 均支持，重试时跳过已保存的内容，只补缺少的份数。
-- **批量扫描和进度恢复**。115 可扫描整个目录或指定范围。视频文件名和文件夹名可分别设置排除规则。本地切换目录后可恢复上一批尚未完成的任务。
-- **字幕推荐与校验**。有视频时长时，优先推荐结束时间接近视频结尾的字幕。校验会拦截正文密集乱码或被当作字幕返回的网页，并显示失败原因。
-- **搜索来源修复**。修复 TVSubtitles 的搜索地址，减少 SubHD 和 TVSubtitles 番号搜索中的无关结果。
-- **版本显示和更新提醒**。顶部、「关于」和更新检查使用同一个实际版本号，避免提示更新到当前版本。
-- **Windows 安装升级**。沿用原安装目录时，安装器会保留程序旁的 `SubtitleFinderData`。
+- **最小字幕体积**。默认过滤小于 20 KB 的字幕，可在设置中调整，填 0 关闭。普通搜索、手动挑选、自动保存、本地下载和存到 115 使用同一个门槛。
+- **过滤提示**。搜索和批量任务显示过滤数量。合格字幕不足时，自动保存会显示实际保存的份数。
+
+上一版的多份自动保存、批次恢复和安装数据保护见 [v1.7.4 发布说明](https://github.com/daoran9/subtitle-finder/releases/tag/v1.7.4)。
 
 ## 主要功能
 
@@ -61,6 +59,8 @@ Windows 程序未签名，首次运行时系统可能显示未知发布者。And
 普通搜索、手动挑选和自动保存共用推荐顺序。已选视频且时长可用时，合格候选按最后一条有效字幕与视频结尾的时间差从小到大排列。时长相同或不可用时，继续按匹配身份、正文中的色花或 98 堂等来源标记和括号说明排序。已确认正文无效的结果会显示原因并禁用勾选。暂时读取失败时，可以点击「查看」重试。
 
 「设置 → 字幕排除关键词」支持每行填写一个词或短语。搜索时匹配字幕标题和文件名，预览、校验和保存时也检查字幕正文，命中任意一项即排除。
+
+「设置 → 最小字幕体积（KB）」默认 20 KB，填 0 关闭。以解压、编码统一和所选简繁转换后的文件大小为准。普通搜索、手动挑选和自动保存均跳过偏小的字幕，下载与存到 115 时也会检查。完整短片字幕低于门槛时，可调低后重新搜索。
 
 「设置 → 仅保存匹配特征的字幕」默认关闭。保存特征预填了色花、98 堂等标记和 `[括号说明]`，每行一项，可自行删除、替换或添加。开启后，原字幕正文命中任意一项即可保存。手动搜索默认列出命中的字幕，点「显示其他」可展开其余结果预览。本地下载、存到 115 和批量匹配均会核对保存特征。
 

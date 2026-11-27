@@ -39,13 +39,15 @@ test("字幕排除规则即时作用于搜索缓存、已读取正文和保存",
   const post = (route, body, method = "POST") => request(url + route, {
     method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
-  const setKeywords = (subtitleExclusionKeywords) => post("/api/settings", { settings: { subtitleExclusionKeywords } }, "PUT");
+  const setKeywords = (subtitleExclusionKeywords) =>
+    post("/api/settings", { settings: { subtitleExclusionKeywords, minSubtitleSizeKb: 0 } }, "PUT");
   const search = () => get("/api/search?q=Sample%20Movie&source=thunder");
   const original = await (await search()).json();
   assert.equal(original.count, 3);
   const id = (name) => original.results.find((result) => result.title === name).id;
   const bodyId = id(names[1]);
   const manualId = id(names[2]);
+  assert.equal((await setKeywords("")).status, 200);
   assert.equal((await get(`/api/preview?id=${bodyId}`)).status, 200);
 
   assert.equal((await setKeywords("  AI DRAFT\r\n\r\nNeural  ")).status, 200);
@@ -74,7 +76,7 @@ test("字幕排除规则即时作用于搜索缓存、已读取正文和保存",
   assert.equal((await get(`/api/download?id=${bodyId}`)).status, 200);
 
   const setSaveFilter = (subtitleSaveFilter, subtitleExclusionKeywords = "") =>
-    post("/api/settings", { settings: { subtitleSaveFilter, subtitleExclusionKeywords } }, "PUT");
+    post("/api/settings", { settings: { subtitleSaveFilter, subtitleExclusionKeywords, minSubtitleSizeKb: 0 } }, "PUT");
   const preview = (candidate) => get(`/api/preview?id=${candidate}&convert=zh-TW`).then((response) => response.json());
   const download = (candidate) => get(`/api/download?id=${candidate}&convert=zh-TW`);
   const saveTo115 = (candidate) => post("/api/drive115/save", { resultId: candidate }).then((response) => response.json());
